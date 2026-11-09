@@ -1,0 +1,34 @@
+name: Deploy Tetris
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  promote:
+    if: github.repository == 'guillaume34110/functional-1' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: tetris-production
+      cancel-in-progress: false
+    env:
+      VALIDATED_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VALIDATED_SHA }}
+          fetch-depth: 0
+      - name: Advance the production deployment branch
+        run: |
+          set -euo pipefail
+          latest="$(git ls-remote origin refs/heads/main | cut -f1)"
+          test -n "$latest"
+          if [ "$latest" != "$VALIDATED_SHA" ]; then
+            echo "A newer main revision is waiting for its own checks."
+            exit 0
+          fi
+          git push origin "$VALIDATED_SHA:refs/heads/production"
