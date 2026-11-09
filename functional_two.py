@@ -19,24 +19,30 @@ class FunctionalTwoSession(NeuralSession):
                 or transitions.shape != (2, len(ACTIONS)) or transitions.dtype != np.uint8
                 or (transitions[0] > 1).any() or not (transitions[0] == 1).any()):
             raise ValueError("invalid Functional 2 menu weights")
+        self.title_frame = base64.b64encode(self.title.tobytes()).decode()
         self.starts = transitions[0] == 1
         self.title_logo = self.title[1:118:2, 1::2]
         super().__init__(release / "model.pt", release / "first-piece.npz")
 
     def reset(self):
+        self.previous_low = None
         self.menu_screen = self.title
         return super().reset()
 
     def result(self, elapsed):
         if self.menu_screen is None:
             low = self.frame[0, 0].numpy()
-            frame = self.renderer(low)
-            # The reference returns to the title after the visible top-out animation.
-            if np.array_equal(low[:len(self.title_logo)], self.title_logo):
-                self.menu_screen = frame
+            if self.previous_low is None or not np.array_equal(low, self.previous_low):
+                frame = self.renderer(low)
+                self.previous_low = low.copy()
+                self.previous_frame = base64.b64encode(frame.tobytes()).decode()
+                # The reference returns to the title after the visible top-out animation.
+                if np.array_equal(low[:len(self.title_logo)], self.title_logo):
+                    self.menu_screen = frame
+            encoded = self.previous_frame
         else:
-            frame = self.menu_screen
-        return {"frame": base64.b64encode(frame.tobytes()).decode(),
+            encoded = self.title_frame if self.menu_screen is self.title else self.previous_frame
+        return {"frame": encoded,
                 "width": 160, "height": 144, "release": "Functional 2",
                 "menu": self.menu_screen is not None,
                 "steps": self.steps, "inference_ms": elapsed}
