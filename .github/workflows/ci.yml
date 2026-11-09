@@ -26,28 +26,3 @@ jobs:
           trap 'docker rm -f functional-1-ci' EXIT
           curl -fsS --retry 15 --retry-delay 1 --retry-all-errors http://127.0.0.1:8765/health
           python checks/browser.py
-
-  promote:
-    name: Promote the checked revision to Coolify
-    if: github.repository == 'guillaume34110/functional-1' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: checks
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    concurrency:
-      group: tetris-production
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Advance the production deployment branch
-        run: |
-          set -euo pipefail
-          latest="$(git ls-remote origin refs/heads/main | cut -f1)"
-          test -n "$latest"
-          if [ "$latest" != "$GITHUB_SHA" ]; then
-            echo "A newer main revision is waiting for its own checks."
-            exit 0
-          fi
-          git push origin "$GITHUB_SHA:refs/heads/production"
