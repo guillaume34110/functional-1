@@ -1,0 +1,6 @@
+.git
+output
+data
+weights
+.venv
+__pycache__
