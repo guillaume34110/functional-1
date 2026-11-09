@@ -1583,7 +1583,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                  glyphs, legacy_ids, addends, pulsed=False, calibrated=0, a_rotation=None, a_proposal_gate=False,
                  a_placement=None, pause=None, gravity=None, wall_poses=None, lateral_motion=None,
                  wall_first_poses=None, visible_stack_guard=None, held_wall_gravity=None,
-                 gravity_spawn_poses=None, sustained_repeat=None):
+                 gravity_spawn_poses=None, sustained_repeat=None, contact_rotations=None, preview_prior=None,
+                 free_rotations=None):
         from counter_model import CounterReadout
 
         super().__init__(codebook, object_shapes, object_tiles, preview_patterns, flash_id, fill_id, panels)
@@ -1650,6 +1651,20 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                 or not bool(visible_stack_guard)):
             raise ValueError("invalid visible stack guard marker")
         self.register_buffer("visible_stack_guard", visible_stack_guard)
+        for name, rotations in (("contact_rotations", contact_rotations), ("free_rotations", free_rotations)):
+            if rotations is not None and (
+                    wall_poses is None or rotations.shape != (len(object_shapes), 2, 3)
+                    or rotations.dtype != torch.int16
+                    or ((rotations[..., 0] < -1) | (rotations[..., 0] >= len(object_shapes))).any()
+                    or (rotations[..., 1:].abs() > 3).any()):
+                raise ValueError(f"invalid witnessed rotation readout: {name}")
+            self.register_buffer(name, rotations)
+        if preview_prior is not None and (
+                visible_stack_guard is None or not pulsed or preview_prior.shape != (len(preview_patterns),)
+                or not preview_prior.is_floating_point() or not torch.isfinite(preview_prior).all()
+                or (preview_prior <= 0).any() or not torch.isclose(preview_prior.sum(), preview_prior.new_tensor(1))):
+            raise ValueError("invalid observed preview probabilities")
+        self.register_buffer("preview_prior", preview_prior)
         if held_wall_gravity is not None and (
                 gravity is None or held_wall_gravity.dtype != torch.bool
                 or held_wall_gravity.ndim != 0 or not bool(held_wall_gravity)):
@@ -1866,10 +1881,9 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         overlay = overlay[:, :, 2:12]
         composition = torch.where(overlay, color[:, None, None], board)
         painted = (overlay.sum((1, 2)) == 4) & (~overlay | (board == self.blank_id)).flatten(1).all(1)
-        deposit = ((details["mode"].argmax(1) == 1) & details["contact_visible"]
-                   & (details["contact_neighbors"][:, 7] > 0) & painted
+        deposit = ((details["mode"].argmax(1) == 1) & painted
                    & (result == composition).flatten(1).all(1))
-        code = deposit.long()
+        code = (deposit & details["contact_visible"] & (details["contact_neighbors"][:, 7] > 0)).long()
         if (animation := details.get("animation")) is not None:
             ending = animation["ending"]
             active = animation["active"][ending]
@@ -1881,7 +1895,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             code[active] = learned.masked_fill(~compacted, 0)
         if (terminal := details.get("terminal")) is not None:
             code[terminal["active"]] = 0
-        return code
+        return code, deposit
 
     def _counter_step(self, frame, action, state, observed):
         from counter_model import FEATURES
@@ -1896,8 +1910,11 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         opening = torch.zeros_like(action) if self.lateral_motion is not None else None
         continued = torch.full_like(action, -1) if self.sustained_repeat is not None else None
         first_turn = torch.ones_like(action, dtype=torch.bool) if self.wall_first_poses is not None else None
+        preview_seed = torch.zeros_like(action)
         if state is not None and state.size(1) == self.state_channels + 2:
             memory = state[:, -1].flatten(1)
+            if self.preview_prior is not None:
+                preview_seed = memory[:, -4].long()
             previous = memory[:, :width]
             if opening is not None:
                 opening = memory[:, -1].long()
@@ -1933,8 +1950,14 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         if self.wall_poses is not None and not observed:
             self.apply_wall_rotation(tokens, action, details, first_turn)
         if self.visible_stack_guard is not None and not observed:
-            self.keep_visible_stack(tokens, details)
+            self.keep_visible_stack(tokens, action, details)
         prediction = self.decode_scene(tokens, details, hard=True)
+        if self.preview_prior is not None and not observed:
+            mask, color = self._hard_object(details["next"])
+            pose = details["next"]["joint"].flatten(1).argmax(1)
+            painted = mask.flatten(1).any(1) & (~mask | (prediction == color[:, None, None])).flatten(1).all(1)
+            details["state"] = update_carried_pose(details["state"], torch.arange(len(pose), device=pose.device),
+                                                   pose.masked_fill(~painted, -1), -1)
         core = self.rendered_state(details, prediction)
         use = (digits >= 0).all(1) & (digits[:, [4, 9, 11]] != 10).all(1)
         if (terminal := details.get("terminal")) is not None:
@@ -1943,7 +1966,27 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         if self.counter.pulsed:
             pending = torch.zeros_like(action)
             if not observed:
-                code = self.rendered_counter_event(tokens, details, prediction)
+                code, deposit = self.rendered_counter_event(tokens, details, prediction)
+                if self.visible_stack_guard is not None:
+                    spawned = code > 0
+                    if self.preview_prior is not None and self.gravity_spawn_poses is not None:
+                        visible_preview, spawn_poses = details["preview_spawns"]
+                        pose = details["next"]["joint"].flatten(1).argmax(1)
+                        spawned = spawned | (deposit & visible_preview & spawn_poses.gather(1, pose[:, None])[:, 0])
+                    keep = ~spawned
+                    if terminal is not None:
+                        keep[terminal["active"]] = False
+                    proposed = prediction[:, :6, 13:19]
+                    if self.preview_prior is not None:
+                        # Carry a reproducible draw stream, advancing it only at proved spawns.
+                        draw = (25173 * preview_seed + 13849) % 65536
+                        preview_seed = torch.where(spawned, draw, preview_seed)
+                        index = ((draw[:, None] / 65536) >= self.preview_prior.cumsum(0)).sum(1)
+                        sampled = self.preview_patterns[index.clamp_max(len(self.preview_patterns) - 1)]
+                        proposed = torch.where(spawned[:, None, None], sampled, proposed)
+                    preview = torch.where(keep[:, None, None], tokens[:, :6, 13:19], proposed)
+                    top = torch.cat((prediction[:, :6, :13], preview, prediction[:, :6, 19:]), dim=2)
+                    prediction = torch.cat((top, prediction[:, 6:]), dim=1)
                 if continued is not None:
                     held = details["state"][:, 18, 0, 0].long()
                     saturated = held > self.sustained_after
@@ -1968,6 +2011,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             memory[:, 0, -1, -2] = (first_turn & ~rotated).to(memory)
         if continued is not None:
             memory[:, 0, -1, -3] = continued.to(memory)
+        if self.preview_prior is not None:
+            memory[:, 0, -1, -4] = preview_seed.to(memory)
         return rendered, torch.cat((core, memory), dim=1)
 
     def _read_current(self, tokens, hidden, prior_state):
@@ -1975,6 +2020,18 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         if self.held_wall_gravity is None:
             return current, pool
         board = tokens[:, :, 2:12].flatten(1)
+        if self.preview_prior is not None and prior_state is not None:
+            feedback = prior_state[:, -1]
+            carried = feedback[:, 0, 0].long()
+            pose = carried.clamp_min(0)
+            cells = self.overlap_cells.flatten(0, 1)[pose]
+            same_screen = (feedback[:, 0, 1] == -2) & (feedback[:, :, 2:12].flatten(1) == board).all(1)
+            exact_pose = (board.gather(1, cells) == self.object_tiles[pose // 180, None]).all(1)
+            trust = same_screen & exact_pose & (carried >= 0) & self.valid_poses.flatten()[pose]
+            joint = current["joint"].flatten(1)
+            latched = torch.full_like(joint, -torch.inf).scatter(1, pose[:, None], 0)
+            current["joint"] = torch.where(trust[:, None], latched, joint).reshape_as(current["joint"])
+            current["visible"] = torch.where(trust[:, None], 20, current["visible"])
         isolated = (board == self.blank_id).sum(1) == 176
         active = isolated.nonzero().flatten()
         if not torch.onnx.is_in_onnx_export() and not len(active):
@@ -2008,6 +2065,37 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         blocked[active] = ~valid | collision
         return blocked
 
+    def visible_preview_spawns(self, tokens):
+        preview = tokens[:, :6, 13:19]
+        count = (preview[..., None] == self.object_tiles).sum((1, 2))
+        visible = (count.amax(1) == 4) & (torch.isin(preview, self.object_tiles).sum((1, 2)) == 4)
+        same = count[:, self.event_poses // 180] == 4
+        return visible, same & self.gravity_spawn_poses.flatten()
+
+    def terminal_start_logit(self, tokens, details):
+        learned = super().terminal_start_logit(tokens, details)
+        if self.preview_prior is None or self.gravity_spawn_poses is None:
+            return learned
+        board = tokens[:, :, 2:12]
+        filled = torch.isin(board, self.object_tiles)
+        ordinary = (filled | (board == self.blank_id)).flatten(1).all(1) & ~filled.all(2).any(1)
+        supported = details["contact_visible"] & (details["contact_neighbors"][:, 7] > 0)
+        current = details["current"]["joint"].flatten(1).argmax(1)
+        proposed = details["next"]["joint"].flatten(1).argmax(1)
+        mask = self.shape_masks.flatten(0, 1)[current].bool()
+        ages = details["state"][:, 17, :, 2:12].masked_fill(~mask, 255).amin((1, 2)).long()
+        action = details["state"][:, 19, 0, 0].long()
+        allowed = ((action == ACTIONS.index("noop")) | (action == ACTIONS.index("down"))
+                   | (action == ACTIONS.index("left")) | (action == ACTIONS.index("right")))
+        mode = details["mode"].argmax(1)
+        resting = ordinary & supported & allowed & (mode == 0) & (proposed == current) & (self.gravity_transition[ages] > 0)
+        details["resting_lock_due"] = resting
+        visible, poses = self.visible_preview_spawns(tokens)
+        vacant = (board.flatten(1)[:, self.overlap_cells.flatten(0, 1)] == self.blank_id).all(2)
+        blocked = visible & poses.any(1) & ~(poses & vacant).any(1)
+        topout = ordinary & supported & ((mode == 1) | resting) & blocked
+        return torch.where(topout, torch.ones_like(learned), learned)
+
     def apply_idle_gravity(self, tokens, action, details, opening=None):
         known, _, _ = self.continuity_signals(tokens, details)
         board = tokens[:, :, 2:12]
@@ -2017,9 +2105,20 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         if opening is not None:
             idle = idle | ((opening >= 0) & (self.gravity_transition[opening % self.opening_period] > 0))
         quiet = action == ACTIONS.index("noop")
+        delayed_drop = torch.zeros_like(quiet)
+        if self.preview_prior is not None:
+            down = ACTIONS.index("down")
+            current = details["current"]["joint"].flatten(1).argmax(1)
+            proposed = details["next"]["joint"].flatten(1).argmax(1)
+            delayed_drop = ((action == down) & (details["previous_action"] == down)
+                            & (details["mode"].argmax(1) == 0)
+                            & ((proposed % 180 // 10 <= current % 180 // 10)
+                               | (proposed % 10 != current % 10) | (proposed // 180 != current // 180))
+                            & ~torch.isin(board, self.object_tiles).all(2).any(1))
         if self.held_wall_gravity is not None:
             quiet = quiet | (self.blocked_direction(tokens, action, details))
-        active = (known & ordinary & quiet & idle).nonzero().flatten()
+        resting = details.get("resting_lock_due", torch.zeros_like(quiet))
+        active = (known & ordinary & (((quiet | delayed_drop) & idle) | resting)).nonzero().flatten()
         if not torch.onnx.is_in_onnx_export() and not len(active):
             return
         current = details["current"]["joint"][active].flatten(1).argmax(1)
@@ -2028,7 +2127,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         ages = details["state"][active, 17, :, 2:12].masked_fill(~mask, 255).amin((1, 2)).long()
         if opening is not None:
             ages = torch.where(opening[active] >= 0, opening[active] % self.opening_period, ages)
-        due = self.gravity_transition[ages] > 0
+        due = (self.gravity_transition[ages] > 0) | resting[active]
         supported = details["contact_neighbors"][active, 7] > 0
         drop = current + 10
         valid_drop = (current % 180 < 170) & self.valid_poses.flatten()[drop.clamp_max(len(masks) - 1)]
@@ -2039,33 +2138,39 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         overlap = (board_flat[:, cells] != self.blank_id).any(2)
         allowed = self.valid_poses.flatten()
         if self.gravity_spawn_poses is not None:
-            allowed = self.gravity_spawn_poses.flatten()
-            preview = tokens[active, :6, 13:19]
-            count = (preview[..., None] == self.object_tiles).sum((1, 2))
-            visible = (count.amax(1) == 4) & (torch.isin(preview, self.object_tiles).sum((1, 2)) == 4)
-            same = count[:, self.event_poses // 180] == 4
-            allowed = allowed & (~visible[:, None] | same)
+            visible, matches = self.visible_preview_spawns(tokens[active])
+            allowed = torch.where(visible[:, None], matches, self.gravity_spawn_poses.flatten())
         scores.masked_fill_(overlap | ~allowed, -torch.inf)
         lock = due & supported & torch.isfinite(scores.amax(1))
         pose = torch.where(lock, scores.argmax(1), copy_pose)
         mode = lock.long()
-        self.select_rendered_pose(details, active, pose, mode)
+        use = ~(delayed_drop[active] | resting[active]) | lock | (due & ~supported & valid_drop)
+        self.select_rendered_pose(details, active[use], pose[use], mode[use])
 
     def apply_lateral_motion(self, tokens, action, details, opening, continued):
         left, right = ACTIONS.index("left"), ACTIONS.index("right")
         lateral = (action == left) | (action == right)
         age = opening if continued is None else torch.where(continued >= 0, continued, opening)
-        if not torch.onnx.is_in_onnx_export() and not (lateral & (age >= 0)).any():
+        held = details["state"][:, 18, 0, 0].long()
+        current_pose = details["current"]["joint"].flatten(1).argmax(1)
+        repeat = torch.zeros_like(lateral)
+        if self.preview_prior is not None and self.sustained_repeat is not None:
+            next_pose = details["next"]["joint"].flatten(1).argmax(1)
+            repeat = ((age < 0) & (held > self.sustained_after)
+                      & (details["mode"].argmax(1) == 0) & (next_pose == current_pose))
+        eligible = lateral & ((age >= 0) | repeat)
+        if not torch.onnx.is_in_onnx_export() and not eligible.any():
             return
         known, _, _ = self.continuity_signals(tokens, details)
-        active = (known & lateral & (age >= 0)).nonzero().flatten()
-        current = details["current"]["joint"][active].flatten(1).argmax(1)
+        active = (known & eligible).nonzero().flatten()
+        current = current_pose[active]
         kind, position = current // 180, current % 180
         y, x = position // 10, position % 10
-        held = details["state"][active, 18, 0, 0].long()
+        held = held[active]
         shift = self.lateral_motion[held]
         if continued is not None:
             phase = continued[active]
+            phase = torch.where(repeat[active], held - self.sustained_after - 1, phase)
             shift = torch.where(phase >= 0, self.sustained_repeat[phase % len(self.sustained_repeat)], shift)
         direction = torch.where(action[active] == left, -1, 1)
         requested = x + direction
@@ -2076,7 +2181,11 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         shifted = kind * 180 + y * 10 + requested.clamp(0, 9)
         free = free & ((~masks[shifted] | (background == self.blank_id)).flatten(1).all(1))
         x = torch.where((shift == 1) & free, requested, x)
-        due = self.gravity_transition[age[active] % self.opening_period] > 0
+        elapsed = age[active] % self.opening_period
+        if self.preview_prior is not None and self.sustained_repeat is not None:
+            ages = details["state"][active, 17, :, 2:12].masked_fill(~masks[current], 255).amin((1, 2)).long()
+            elapsed = torch.where(repeat[active], ages, elapsed)
+        due = self.gravity_transition[elapsed] > 0
         drop = kind * 180 + (y + 1).clamp_max(17) * 10 + x
         can_drop = (y < 17) & self.valid_poses.flatten()[drop]
         can_drop = can_drop & ((~masks[drop] | (background == self.blank_id)).flatten(1).all(1))
@@ -2091,7 +2200,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             return
         known, _, _ = self.continuity_signals(tokens, details)
         free = ~details["contact_neighbors"].bool().any(1)
-        active = (known & free & rotating).nonzero().flatten()
+        eligible = free if self.contact_rotations is None else torch.ones_like(free)
+        active = (known & eligible & rotating).nonzero().flatten()
         if not torch.onnx.is_in_onnx_export() and not len(active):
             return
         current = details["current"]["joint"][active].flatten(1).argmax(1)
@@ -2102,6 +2212,12 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         if first_turn is not None:
             first = self.wall_first_poses[key]
             choice = torch.where((first_turn[active] & (first[:, 0] >= 0))[:, None], first, choice)
+        if self.free_rotations is not None:
+            fallback = self.free_rotations[kind, (action[active] == b).long()]
+            choice = torch.where((choice[:, 0] < 0)[:, None], fallback, choice)
+        if self.contact_rotations is not None:
+            contact = self.contact_rotations[kind, (action[active] == b).long()]
+            choice = torch.where(free[active, None], choice, contact)
         target, dy, dx = choice.long().unbind(1)
         y, x = row + dy, column + dx
         position = y.clamp(0, 17) * 10 + x.clamp(0, 9)
@@ -2126,19 +2242,54 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         details["mode"] = scores.index_copy(0, active, F.one_hot(mode, 3).to(scores))
         details["state"] = update_carried_pose(details["state"], active, pose, -1)
 
-    def keep_visible_stack(self, tokens, details):
+    def keep_visible_stack(self, tokens, action, details):
         known, _, _ = self.continuity_signals(tokens, details)
         board = tokens[:, :, 2:12]
         filled = torch.isin(board, self.object_tiles)
         ordinary = (filled | (board == self.blank_id)).flatten(1).all(1)
         mode = details["mode"].argmax(1)
         support = details["contact_neighbors"][:, 7] > 0
-        reject = ((mode == 2) & ~filled.all(2).any(1)) | ((mode == 1) & ~support)
-        active = (known & ordinary & reject).nonzero().flatten()
+        rewrite = (mode == 2) & ~filled.all(2).any(1)
+        reject = rewrite | ((mode == 1) & ~support)
+        previous_full = torch.isin(details["previous_board"], self.object_tiles).all(2).any(1)
+        ordinary_context = ~filled.all(2).any(1) & ~previous_full
+        visible_next = details["next"]["visible"][:, 0] > 0
+        unproved_copy = (mode == 0) & ~known & (visible_next | (details["current"]["visible"][:, 0] > 0))
+        preserve = (rewrite & ~previous_full) | (unproved_copy & ordinary_context)
+        for phase in ("animation", "terminal"):
+            if phase in details:
+                preserve[details[phase]["active"]] = False
+        current_pose = details["current"]["joint"].flatten(1).argmax(1)
+        next_pose = details["next"]["joint"].flatten(1).argmax(1)
+        dy = next_pose % 180 // 10 - current_pose % 180 // 10
+        dx = next_pose % 10 - current_pose % 10
+        previous_action = details["previous_action"]
+        a, b, up, start, down, left, right = (ACTIONS.index(name) for name in ("a", "b", "up", "start", "down", "left", "right"))
+        rotating = (action == a) | (action == b) | (previous_action == a) | (previous_action == b)
+        max_drop = 1 + ((action == down) | (previous_action == down)).long()
+        leftward = (action == left) | (previous_action == left)
+        rightward = (action == right) | (previous_action == right)
+        impossible = ((dy < 0) | (dy > max_drop) | (dx < -leftward.long()) | (dx > rightward.long())
+                      | (next_pose // 180 != current_pose // 180))
+        ordinary_motion = known & ordinary_context & ~rotating & (action != up) & (action != start)
+        masks = self.shape_masks.flatten(0, 1).bool()
+        copy_overlap = (masks[next_pose] & ~masks[current_pose] & filled).flatten(1).any(1)
+        motion = ((mode == 0) & ((ordinary_motion & impossible)
+                                | (known & ordinary_context & (~visible_next | copy_overlap))))
+        spawn = torch.zeros_like(known)
+        lock = torch.zeros_like(known)
+        if self.preview_prior is not None and self.gravity_spawn_poses is not None:
+            visible_preview, spawn_poses = self.visible_preview_spawns(tokens)
+            details["preview_spawns"] = visible_preview, spawn_poses
+            chosen_spawn = spawn_poses.gather(1, next_pose[:, None])[:, 0] & ~(masks[next_pose] & filled).flatten(1).any(1)
+            check_spawn = visible_preview & ordinary_context
+            lock = (mode == 1) & known & support & check_spawn
+            spawn = (((mode == 1) & ~chosen_spawn) | unproved_copy) & visible_next & check_spawn
+            spawn = spawn | (lock & ~visible_next)
+        active = (ordinary & ((known & reject) | preserve | motion | spawn)).nonzero().flatten()
         if not torch.onnx.is_in_onnx_export() and not len(active):
             return
-        current = details["current"]["joint"][active].flatten(1).argmax(1)
-        masks = self.shape_masks.flatten(0, 1).bool()
+        current = current_pose[active]
         cells = self.overlap_cells.flatten(0, 1)
         source = board[active]
         background = source.masked_fill(masks[current], self.blank_id)
@@ -2150,13 +2301,28 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         dx = candidates % 10 - old_x[:, None]
         same_style = self.object_tiles[current // 180, None] == self.object_tiles[candidates // 180]
         local = (dy >= -2) & (dy <= 3) & (dx.abs() <= 2) & same_style
-        legal = torch.stack((copy_clear & local, deposit_clear & support[active, None]), dim=1)
+        bounded = ((dy >= 0) & (dy <= max_drop[active, None])
+                   & (dx >= -leftward[active, None].long()) & (dx <= rightward[active, None].long())
+                   & (candidates // 180 == current[:, None] // 180))
+        motion_only = motion[active, None]
+        local = torch.where(ordinary_motion[active, None], bounded, local)
+        spawn_only = spawn[active, None]
+        if self.preview_prior is not None and self.gravity_spawn_poses is not None:
+            deposit_clear = deposit_clear & (~check_spawn[active, None] | spawn_poses[active])
+        legal = torch.stack((copy_clear & local & known[active, None] & ~lock[active, None],
+                             deposit_clear & (support[active, None] | spawn_only) & ~motion_only), dim=1)
         legal = legal & (self.valid_poses.flatten())
         scores = details["event_scores"][active, :2].masked_fill(~legal, -torch.inf)
         chosen = scores.flatten(1).argmax(1)
         usable = torch.isfinite(scores.flatten(1).amax(1))
         self.select_rendered_pose(details, active[usable], chosen[usable] % len(candidates),
                                   chosen[usable] // len(candidates))
+        held = active[(preserve[active] | spawn[active]) & ~usable]
+        visible = details["next"]["visible"]
+        details["next"]["visible"] = visible.index_copy(0, held, torch.full_like(visible[held], -20))
+        modes = details["mode"]
+        retained = F.one_hot(torch.ones_like(held), 3).to(modes)
+        details["mode"] = modes.index_copy(0, held, retained)
 
 
 class RowMotionClockSceneDynamics(RowTransportSceneDynamics):
@@ -2488,7 +2654,8 @@ def scene_from_weights(weights):
                           if "pause_transition" in weights else None, weights.get("gravity_transition"),
                           weights.get("wall_poses"), weights.get("lateral_motion"), weights.get("wall_first_poses"),
                           weights.get("visible_stack_guard"), weights.get("held_wall_gravity"),
-                          weights.get("gravity_spawn_poses"), weights.get("sustained_repeat"))
+                          weights.get("gravity_spawn_poses"), weights.get("sustained_repeat"),
+                          weights.get("contact_rotations"), weights.get("preview_prior"), weights.get("free_rotations"))
         model = family(*arguments)
     if family is RelativeProposalSceneDynamics and "proposal_gate_calibration" not in weights:
         weights = {**weights, "proposal_gate_calibration": model.proposal_gate_calibration.detach()}

@@ -125,6 +125,12 @@ class ScreenController:
         self.hold_left = 0
 
     def choose(self, frame):
+        if self.profile == "sustained":
+            if self.hold_left == 0:
+                self.hold = str(self.rng.choice(("noop", "left", "right", "down")))
+                self.hold_left = int(self.rng.integers(16, 49))
+            self.hold_left -= 1
+            return self.hold
         board = occupancy(frame)
         active = np.argwhere(board & ~self.locked)
         new_spawn = False
@@ -177,7 +183,7 @@ def collect_episode(context, seed, steps, profile):
     rng = np.random.default_rng(seed)
     game = PyBoy(str(ROOT / context["rom"]["file"]), window="null", sound_emulated=False,
                  color_palette=(0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000))
-    controller = ScreenController(seed, profile)
+    controller = ScreenController(seed, "heuristic" if profile == "sustained" else profile)
     try:
         game.set_emulation_speed(0)
         boot_frames = int(rng.integers(240, 1000))
@@ -195,6 +201,7 @@ def collect_episode(context, seed, steps, profile):
             frame = step(game, controller.choose(frame))
         if counters(game)["level"] is None:
             raise RuntimeError("warmup did not leave a gameplay screen")
+        controller.profile = profile
         frames = np.empty((steps + 1, 72, 80), dtype=np.uint8)
         actions = np.empty(steps, dtype=np.uint8)
         frames[0] = frame
@@ -246,6 +253,9 @@ def main():
     parser.add_argument("--episodes", type=int, default=64)
     parser.add_argument("--steps", type=int, default=1400)
     parser.add_argument("--seed", type=int, default=20261104)
+    parser.add_argument("--profile", action="append",
+                        choices=("heuristic", "exploration", "topout", "pause", "sustained"),
+                        help="cycle through the supplied capture profiles")
     args = parser.parse_args()
     if args.episodes > 128 or not 256 <= args.steps <= 6000:
         parser.error("require 10..128 episodes and 256..6000 steps")
@@ -261,8 +271,9 @@ def main():
                 "seed": args.seed, "split_unit": "independent run before windowing",
                 "limits": {"raw_bytes": 576 * 1024 ** 2, "compressed_bytes": 128 * 1024 ** 2}}
     total_bytes, signatures, action_counts = 0, set(), Counter()
+    schedule = args.profile or ("heuristic",) * 7 + ("exploration", "topout", "pause")
     for i, split in enumerate(assignments):
-        profile = "exploration" if i % 10 == 7 else "topout" if i % 10 == 8 else "pause" if i % 10 == 9 else "heuristic"
+        profile = schedule[i % len(schedule)]
         for attempt in range(16):
             frames, actions, metadata = collect_episode(context, args.seed + i * 1009 + attempt * 1000003, args.steps, profile)
             signature = hashlib.sha256(frames[:min(32, len(frames))].tobytes() + actions[:31].tobytes()).hexdigest()

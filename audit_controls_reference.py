@@ -38,7 +38,8 @@ def replay_prefix(game, frames, actions, metadata, index, step_fn=step,
     boot = int(rng.integers(240, 1000))
     if boot != metadata["boot_frames"]:
         raise ValueError("boot metadata does not match collection seed")
-    controller = controller_factory(metadata["seed"], metadata["profile"])
+    profile = metadata["profile"]
+    controller = controller_factory(metadata["seed"], "heuristic" if profile == "sustained" else profile)
     game.set_emulation_speed(0); game.tick(boot, True)
     step_fn(game, "a")
     for _ in range(10):

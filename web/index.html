@@ -56,7 +56,7 @@ dl{margin:0}dt,dd{margin:.55rem 0;display:inline-block}dt{width:46%;color:#d3c9e
 <aside>
 <section class="card">
 <h2>Game controls</h2>
-<div class="controls"><button id="pause">Pause</button><button id="reset">Restart</button></div>
+<div class="controls"><button id="start-game" hidden>Play</button><button id="pause">Pause</button><button id="reset">Restart</button></div>
 </section>
 <section class="card">
 <h2>Keyboard</h2>
@@ -86,12 +86,18 @@ function send(pulse,reset){
  if(worker)worker.postMessage(input);
  else if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(input));
 }
+function setPaused(value){
+ paused=value;
+ document.querySelector('#pause').textContent=paused?"Resume":"Pause";
+}
 function press(action){
+ if(menu&&(action==='a'||action==='start'))setPaused(false);
  if(discrete.has(action)){if(liveInput)send(action);else pulses.push(action)}
  else if(!held.includes(action)){held.push(action);send(action)}
 }
 function release(action){held=held.filter(x=>x!==action);send()}
 window.addEventListener('keydown',e=>{
+ if(e.key==='Enter'&&e.target.closest?.('button, a'))return;
  const action=buttons[e.key];if(!action)return;e.preventDefault();
  if(!e.repeat)press(action);
 });
@@ -102,7 +108,7 @@ for(const key of document.querySelectorAll('[data-action]')){
  key.onpointerdown=e=>{key.setPointerCapture(e.pointerId);press(action)};
  key.onlostpointercapture=()=>release(action);
 }
-window.addEventListener('blur',()=>{held=[];pulses=[];paused=true;document.querySelector('#pause').textContent="Resume";send()});
+window.addEventListener('blur',()=>{held=[];pulses=[];setPaused(true);send()});
 function draw(data){
  if(data.frame){
   const width=data.width??80,height=data.height??72;
@@ -117,10 +123,12 @@ function draw(data){
   document.title=data.release+' · Neural Tetris';document.querySelector('header strong').textContent=data.release;document.querySelector('#release').textContent=data.release
  }
  menu=data.menu===true;
+ document.querySelector('#start-game').hidden=!menu;
  status.textContent=menu?'Press Z or Enter to play':`${data.steps} neural steps · ${data.inference_ms.toFixed(1)} ms / step`;}
 async function request(path,body){let response=await fetch(location.pathname.replace(/\/+$/,'')+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw Error(await response.text());return response.json()}
-document.querySelector('#pause').onclick=e=>{paused=!paused;e.target.textContent=paused?"Resume":"Pause";send()};
+document.querySelector('#start-game').onclick=()=>press('start');
+document.querySelector('#pause').onclick=()=>{setPaused(!paused);send()};
 document.querySelector('#reset').onclick=()=>{held=[];pulses=[];if(liveInput)send(undefined,true);else resetRequested=true};
 if(worker){
  worker.onmessage=({data})=>{if(data.error)status.textContent=data.error;else draw(data)};
