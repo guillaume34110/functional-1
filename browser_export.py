@@ -167,12 +167,21 @@ def main():
     models = args.destination / "models"
     models.mkdir(parents=True, exist_ok=True)
     (args.destination / "v1").mkdir(exist_ok=True)
+    (args.destination / "v3").mkdir(exist_ok=True)
     for path, name in (("", "index.html"), ("/v1", "v1/index.html")):
-        (args.destination / name).write_text(version_page(path, browser=True), encoding="utf-8")
+        page = version_page(path, browser=True)
+        page = page.replace('<nav aria-label="Game version">', '<nav aria-label="Game version"><a href="/v3">V3</a>')
+        (args.destination / name).write_text(page, encoding="utf-8")
     (args.destination / "health").write_text("ok\n", encoding="utf-8")
     web = Path(__file__).with_name("web")
-    for name in ("local-game.mjs", "native-render.mjs"):
+    for name in ("local-game.mjs", "native-render.mjs", "color-render.mjs"):
         copyfile(web / name, args.destination / name)
+    color_page = (web / "color.html").read_text(encoding="utf-8")
+    _, marker, controls = version_page("", browser=True).partition("<script>")
+    if not marker:
+        raise ValueError("missing shared browser controls")
+    (args.destination / "v3/index.html").write_text(color_page + marker + controls, encoding="utf-8")
+    copyfile(RELEASE.with_name("functional-3") / "color.json", models / "v3-color.json")
     versions = {
         "v1": NeuralSession(RELEASE / "model.pt", RELEASE / "first-piece.npz"),
         "v2": FunctionalTwoSession(RELEASE.with_name("functional-2")),

@@ -2,6 +2,8 @@
 
 The [Functional 2 release](docs/functional-2-baseline.md#functional-2-release) adds a native 160×144 display, the title and pause menus, and automatic gravity. The hosted application opens [V2](https://tetris.progsoft.eu/) by default. Select [V1](https://tetris.progsoft.eu/v1) to compare with the original release. Each version keeps its own game state.
 
+Neuronal Tetris Color adds a Game Boy Color-style palette, seven candy-colored sprites, a bunny mascot, and new title, pause, game-over, and Progsoft credits screens. It uses the V2 recurrent gameplay model with a separate color readout fitted on the recolored captures. [Play V3](https://tetris.progsoft.eu/v3)
+
 Functional 1 is a small action-conditioned game model. You choose the buttons and the model produces the next screen from the current image and recurrent memory. The released checkpoint is the 329,982-byte V85 model from the verified human playthrough.
 
 ## Play locally
@@ -15,18 +17,22 @@ Open [the local game](http://127.0.0.1:8765/). Use the arrow keys to move and so
 
 On the V2 title screen, use Left or Down to lower the starting level and Right or Up to raise it. Press Z or Enter to play at the selected level.
 
+For V3, run the container below and open [the local color game](http://127.0.0.1:8765/v3). Use the same keyboard controls or the on-screen buttons. The title screen offers starting levels 1–9 and access to the credits. The game keeps the selected level when you restart.
+
 ![Functional 1 desktop design concept](docs/design/functional-1-desktop.png)
 
 [Mobile design concept](docs/design/functional-1-mobile.png)
 
 ## Container deployment
 
-Build the root Dockerfile and route traffic to port 8765. The health endpoint is `/health`. The build verifies both release manifests and exports their models. The container serves the browser runtime and weights as static files, with V2 at `/` and V1 at `/v1`. Once a version is loaded, the browser keeps its game state and runs inference locally.
+Build the root Dockerfile and route traffic to port 8765. The health endpoint is `/health`. The build verifies all three release manifests, exports the ONNX models, and serves static assets. Open `/` for V2, `/v1` for V1, or `/v3` for Neuronal Tetris Color. Once a version is loaded, the browser keeps its game state and runs inference locally.
 
 ```sh
 docker build -t functional-1 .
 docker run --rm -p 8765:8765 functional-1
 ```
+
+Run `python checks/browser.py` against the running container to verify the three releases. The V3 check covers level selection, credits, pause and resume, game over, restart, and play with the network disconnected.
 
 ## Training
 
@@ -39,6 +45,22 @@ Use the [game model cookbook](docs/game-model-cookbook.md) to adapt this workflo
 5. Preserve the V84 gameplay tensors and fit 24 pause transition coefficients on nine training sequences for V85. Keep the previous screen and recurrent state while paused. Compare the pause panel and the first resumed frame to the reference on five separate validation games.
 
 The ROM supplies training observations. In the hosted game, the browser feeds each generated screen and its recurrent state into the next model step.
+
+### V3 color training
+
+Supply the preserved Adjustris training corpus and both V2 reference corpora. Each directory must contain its original manifest and episode files.
+
+```sh
+python train_color.py --corpus "$ORIGINAL_CORPUS" \
+  --corpus "$V2_REFERENCE_CORPUS" --corpus "$V2_SUSTAINED_CORPUS" \
+  --output output/v3-color-training
+```
+
+The converter keeps the original action sequence and split for every episode. It pairs the 80×72 source screens with 160×144 indexed-color targets using the artwork in [color_art.py](color_art.py). The color readout fits a categorical tile output for the board and HUD from the training split. Validation and test compare those outputs with the recolored targets without updating the readout. The run writes the reformatted dataset, its manifest, and the fitted `color.json`.
+
+The container uses the verified readout in `releases/functional-3/`. In the browser, the original recurrent output feeds the next model step and the color readout produces the displayed screen. The two versions share the V2 ONNX graphs, so V3 downloads only the additional color data.
+
+The released fit used 82 training episodes and preserved 9 validation and 9 test episodes. The readout matched every evaluated board and HUD tile in both held-out splits. Those figures measure color rendering against the converted targets.
 
 ## What worked
 

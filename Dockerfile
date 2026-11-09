@@ -15,10 +15,12 @@ COPY browser_assets.py browser_export.py play.py run.py model.py token_model.py 
 COPY web/ web/
 COPY releases/functional-1/ releases/functional-1/
 COPY releases/functional-2/ releases/functional-2/
+COPY releases/functional-3/ releases/functional-3/
 RUN (cd releases/functional-1 && sha256sum -c SHA256SUMS) && \
     (cd releases/functional-2 && sha256sum -c SHA256SUMS) && \
+    (cd releases/functional-3 && sha256sum -c SHA256SUMS) && \
     PYTHONWARNINGS=ignore python browser_export.py /site && \
-    gzip -k /site/models/*.onnx
+    gzip -k /site/models/*.onnx /site/models/v3-color.json
 
 FROM nginxinc/nginx-unprivileged:1.28-alpine
 COPY web/nginx.conf /etc/nginx/nginx.conf

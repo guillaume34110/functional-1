@@ -1,6 +1,7 @@
 """Play both browser models with the network disabled after loading their assets."""
 import os
 import re
+from pathlib import Path
 from time import monotonic
 
 from playwright.sync_api import expect, sync_playwright
@@ -118,6 +119,62 @@ with sync_playwright() as playwright:
     expect(status).to_contain_text("0 neural steps")
     page.get_by_role("button", name="Resume").click()
     wait_steps(page, 10)
+    assert requests[before:] == [], requests[before:]
+    assert sockets == [], sockets
+
+    context.set_offline(False)
+    page.get_by_role("link", name="V3", exact=True).click()
+    expect(page).to_have_url(URL + "/v3")
+    expect(status).to_have_text(TITLE, timeout=60000)
+    expect(canvas).to_have_attribute("data-screen", "title")
+    expect(canvas).to_have_attribute("width", "160")
+    expect(canvas).to_have_attribute("height", "144")
+    context.set_offline(True)
+    before = len(requests)
+    screenshot_dir = os.environ.get("V3_SCREENSHOT_DIR")
+
+    def capture(name):
+        if screenshot_dir:
+            page.screenshot(path=Path(screenshot_dir) / f"{name}.png")
+
+    capture("title")
+    page.get_by_role("button", name="Credits").click()
+    expect(canvas).to_have_attribute("data-screen", "credits")
+    expect(status).to_have_text("A game by Progsoft")
+    page.get_by_role("button", name="Back to title").click()
+    expect(canvas).to_have_attribute("data-screen", "title")
+    page.keyboard.press("ArrowRight")
+    expect(level).to_have_text("2")
+    page.get_by_role("button", name="Play", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "game")
+    expect(level).to_be_hidden()
+    wait_steps(page, 2)
+    assert canvas.evaluate("""canvas => {
+      const pixels = canvas.getContext('2d').getImageData(16, 0, 80, 144).data;
+      return pixels.some((red, index) => index % 4 === 0 && red > 170);
+    }"""), "the falling piece should have a color distinct from the dark playfield"
+    capture("game")
+    page.get_by_role("button", name="Pause", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "pause")
+    expect(status).to_have_text("Paused")
+    capture("pause")
+    page.get_by_role("button", name="Resume", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "game")
+    cadence(page, "V3", 10)
+    page.keyboard.down("ArrowDown")
+    try:
+        expect(canvas).to_have_attribute("data-screen", "over", timeout=120000)
+        capture("game-over")
+        expect(canvas).to_have_attribute("data-screen", "title", timeout=15000)
+    finally:
+        page.keyboard.up("ArrowDown")
+    expect(level).to_have_text("2")
+    page.keyboard.press("z")
+    expect(canvas).to_have_attribute("data-screen", "game")
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    expect(page.get_by_role("button", name="Rotate with Z")).to_be_visible()
+    capture("mobile")
     assert requests[before:] == [], requests[before:]
     assert sockets == [], sockets
     browser.close()
