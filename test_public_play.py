@@ -4,13 +4,63 @@ import threading
 import unittest
 from urllib.request import build_opener, HTTPCookieProcessor, ProxyHandler, Request
 
+import numpy as np
 import torch
 
 from play import handler_for, HTTPServer, NeuralSession, RELEASE
 from functional_two import FunctionalTwoSession
+from model import ACTIONS
+from object_annotations import classify_board
+from token_model import decode_tokens
 
 
 class PublicPlayTest(unittest.TestCase):
+    def test_bar_rotation_respects_both_walls(self):
+        torch.set_num_threads(1)
+        game = FunctionalTwoSession(RELEASE.with_name("functional-2"))
+        model = game.model
+        shapes = model.object_shapes.tolist()
+        horizontal = shapes.index([[0, 0], [0, 1], [0, 2], [0, 3]])
+        vertical = shapes.index([[0, 0], [1, 0], [2, 0], [3, 0]])
+
+        def frame(kind, row, column):
+            tokens = model.frame_tokens(game.frame)
+            board = tokens[0, :, 2:12]
+            board.fill_(model.blank_id)
+            mask = model.shape_masks[kind, row * 10 + column].bool()
+            board[mask] = model.object_tiles[kind]
+            return decode_tokens(tokens, model.codebook)
+
+        with torch.inference_mode():
+            # These two poses give opposite outcomes in the ROM when B is pressed.
+            for before, after in (((vertical, 1, 1), (vertical, 1, 1)),
+                                  ((horizontal, 2, 6), (vertical, 1, 7))):
+                with self.subTest(before=before):
+                    actual, _ = model.predict_frame(frame(*before), torch.tensor([ACTIONS.index("b")]))
+                    self.assertTrue(torch.equal(actual[:, :, :, 8:48], frame(*after)[:, :, :, 8:48]))
+
+    def test_selected_level_changes_the_hud_and_the_opening_drop(self):
+        torch.set_num_threads(1)
+        game = FunctionalTwoSession(RELEASE.with_name("functional-2"))
+
+        def first_drop(level):
+            game.reset()
+            for _ in range(abs(game.level - level)):
+                game.step("right" if game.level < level else "left")
+            self.assertEqual(game.level, level)
+            game.step("start")
+            self.assertEqual(int(game.model.counter.read(game.frame)[0, -1]), level)
+            initial = classify_board(game.frame[0, 0].numpy())
+            for tick in range(1, 25):
+                game.step("noop")
+                if not np.array_equal(initial, classify_board(game.frame[0, 0].numpy())):
+                    return tick
+            self.fail("opening piece did not move")
+
+        self.assertGreater(first_drop(1), first_drop(9))
+        game.reset()
+        self.assertEqual(game.step("up")["level"], 9)
+
     def test_two_visitors_can_play_and_restart_independently(self):
         torch.set_num_threads(1)
         seed = NeuralSession(RELEASE / "model.pt", RELEASE / "first-piece.npz")

@@ -13,6 +13,8 @@ python play.py
 
 Open [the local game](http://127.0.0.1:8765/). Use the arrow keys to move and soft drop, Z and X to rotate, and Enter for the in-game pause. The application also has a separate pause button that stops requests. The release directory contains the verified checkpoint, the first playable reference screen, and their SHA-256 digests.
 
+On the V2 title screen, use Left or Down to lower the starting level and Right or Up to raise it. Press Z or Enter to play at the selected level.
+
 ![Functional 1 desktop design concept](docs/design/functional-1-desktop.png)
 
 [Mobile design concept](docs/design/functional-1-mobile.png)
@@ -27,6 +29,8 @@ docker run --rm -p 8765:8765 functional-1
 ```
 
 ## Training
+
+Use the [game model cookbook](docs/game-model-cookbook.md) to adapt this workflow to another game.
 
 1. Capture Adjustris v1.1 with PyBoy. Record four Game Boy frames per command and reduce the 160×144 screen to 80×72 with four shades. Each trajectory stores screens and the corresponding button sequence. Divide the recordings by episode before extracting windows.
 2. Train the image dynamics from the observed screen, current button and causal history. The early baseline used a convolutional GRU with categorical pixel loss. The released scene model uses a learned tile representation, recurrent visual features and separate predictions for the moving piece, stack, preview and screen transitions.
