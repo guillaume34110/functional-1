@@ -79,7 +79,9 @@ const buttons={ArrowLeft:'left',ArrowRight:'right',ArrowDown:'down',ArrowUp:'up'
 const discrete=new Set(['a','b','start']);
 const streaming=false;
 const browserLocal=false;
-const worker=browserLocal?new Worker('/local-game.mjs?version='+(location.pathname.startsWith('/v1')?'v1':'v2'),{type:'module'}):null;
+const colorVersion=/^\/v3\/?$/.test(location.pathname);
+const worker=browserLocal?new Worker('/local-game.mjs?version='+(colorVersion?'v3':location.pathname.startsWith('/v1')?'v1':'v2'),{type:'module'}):null;
+const creditsButton=document.querySelector('#credits');
 const liveInput=streaming||browserLocal;
 const socket=streaming?new WebSocket(new URL('/stream',location.href).href.replace(/^http/,'ws')):null;
 function send(pulse,reset){
@@ -115,7 +117,7 @@ function draw(data){
  if(data.frame){
   const width=data.width??80,height=data.height??72;
   if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height}
-  const shades=[[20,42,37,255],[62,103,79,255],[134,182,125,255],[197,231,161,255]];
+  const shades=data.palette?.map(rgb=>[...rgb,255])??[[20,42,37,255],[62,103,79,255],[134,182,125,255],[197,231,161,255]];
   const raw=typeof data.frame==='string'?Uint8Array.from(atob(data.frame),value=>value.charCodeAt(0)):data.frame;
   const image=ctx.createImageData(width,height);
   for(let i=0;i<raw.length;i++)image.data.set(shades[raw[i]],i*4);
@@ -125,17 +127,28 @@ function draw(data){
   document.title=data.release+' · Neural Tetris';document.querySelector('header strong').textContent=data.release;document.querySelector('#release').textContent=data.release
  }
  menu=data.menu===true;
- levelMenu=menu&&Number.isInteger(data.level);
+ const credits=data.screen==='credits';
+ levelMenu=menu&&!credits&&Number.isInteger(data.level);
  const level=document.querySelector('#starting-level');
  level.hidden=!levelMenu;
  if(levelMenu)level.querySelector('output').value=data.level;
- document.querySelector('#start-game').hidden=!menu;
- status.textContent=menu?'Press Z or Enter to play':`${data.steps} neural steps · ${data.inference_ms.toFixed(1)} ms / step`;}
+ document.querySelector('#start-game').hidden=!menu||credits;
+ if(creditsButton){
+  creditsButton.hidden=!menu;
+  creditsButton.textContent=credits?'Back to title':'Credits';
+  document.querySelector('#pause').hidden=menu||data.screen==='over';
+  document.querySelector('#pause').textContent=paused||data.screen==='pause'?'Resume':'Pause';
+  canvas.dataset.screen=data.screen;
+ }
+ status.textContent=credits?'A game by Progsoft':data.screen==='over'?'Game over':
+  menu?'Press Z or Enter to play':colorVersion&&data.screen==='pause'?'Paused':
+  `${data.steps} neural steps · ${data.inference_ms.toFixed(1)} ms / step`;}
 async function request(path,body){let response=await fetch(location.pathname.replace(/\/+$/,'')+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw Error(await response.text());return response.json()}
 document.querySelector('#start-game').onclick=()=>press('start');
-document.querySelector('#pause').onclick=()=>{setPaused(!paused);send()};
+document.querySelector('#pause').onclick=()=>{if(colorVersion&&!paused)press('start');else{setPaused(!paused);send()}};
 document.querySelector('#reset').onclick=()=>{held=[];pulses=[];if(liveInput)send(undefined,true);else resetRequested=true};
+if(creditsButton)creditsButton.onclick=()=>worker.postMessage({held:'noop',paused,credits:true});
 if(worker){
  worker.onmessage=({data})=>{if(data.error)status.textContent=data.error;else draw(data)};
  worker.onerror=event=>{status.textContent=event.message||'Could not start the browser model.'};
