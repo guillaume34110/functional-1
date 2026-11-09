@@ -1584,7 +1584,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                  a_placement=None, pause=None, gravity=None, wall_poses=None, lateral_motion=None,
                  wall_first_poses=None, visible_stack_guard=None, held_wall_gravity=None,
                  gravity_spawn_poses=None, sustained_repeat=None, contact_rotations=None, preview_prior=None,
-                 free_rotations=None):
+                 free_rotations=None, wall_phase_poses=None):
         from counter_model import CounterReadout
 
         super().__init__(codebook, object_shapes, object_tiles, preview_patterns, flash_id, fill_id, panels)
@@ -1659,6 +1659,20 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                     or (rotations[..., 1:].abs() > 3).any()):
                 raise ValueError(f"invalid witnessed rotation readout: {name}")
             self.register_buffer(name, rotations)
+        phase_shapes = None
+        if wall_phase_poses is not None:
+            if (wall_poses is None or preview_prior is None or wall_phase_poses.shape != (4, 2, 3)
+                    or wall_phase_poses.dtype != torch.int16
+                    or ((wall_phase_poses[..., 0] < 0) | (wall_phase_poses[..., 0] >= len(object_shapes))).any()
+                    or (wall_phase_poses[..., 1:].abs() > 3).any()):
+                raise ValueError("invalid phased wall rotation readout")
+            phase_shapes = wall_phase_poses[:, 0, 0].long().roll(1)
+            if (phase_shapes.unique().numel() != 2 or not torch.equal(phase_shapes, phase_shapes.roll(2))
+                    or not torch.equal(wall_phase_poses[:, 1, 0].long(), phase_shapes.roll(1))
+                    or object_tiles[phase_shapes].unique().numel() != 1):
+                raise ValueError("phased rotations must alternate two poses of one piece")
+        self.register_buffer("wall_phase_poses", wall_phase_poses)
+        self.register_buffer("wall_phase_shapes", phase_shapes, persistent=False)
         if preview_prior is not None and (
                 visible_stack_guard is None or not pulsed or preview_prior.shape != (len(preview_patterns),)
                 or not preview_prior.is_floating_point() or not torch.isfinite(preview_prior).all()
@@ -1910,6 +1924,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         opening = torch.zeros_like(action) if self.lateral_motion is not None else None
         continued = torch.full_like(action, -1) if self.sustained_repeat is not None else None
         first_turn = torch.ones_like(action, dtype=torch.bool) if self.wall_first_poses is not None else None
+        wall_phase = torch.zeros_like(action) if self.wall_phase_poses is not None else None
         preview_seed = torch.zeros_like(action)
         if state is not None and state.size(1) == self.state_channels + 2:
             memory = state[:, -1].flatten(1)
@@ -1920,6 +1935,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                 opening = memory[:, -1].long()
             if first_turn is not None:
                 first_turn = memory[:, -2] > 0
+            if wall_phase is not None:
+                wall_phase = memory[:, -5].long()
             if continued is not None:
                 continued = memory[:, -3].long()
             if not observed:
@@ -1930,6 +1947,12 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         positions = (rows * tokens.size(2) + cols).expand(tokens.size(0), -1)
         tokens = tokens.flatten(1).scatter(1, positions, legacy).reshape_as(tokens)
         details = self.scene_details(tokens, action, state)
+        if wall_phase is not None:
+            occupied = torch.isin(tokens[:, :, 2:12], self.object_tiles)
+            before = torch.isin(details["previous_board"], self.object_tiles)
+            change = occupied.sum((1, 2)) - before.sum((1, 2))
+            born = (change >= 4) | ((change < 0) & before.all(2).any(1))
+            details["wall_phase"] = wall_phase.masked_fill(born, 0)
         if self.gravity_transition is not None:
             offset = torch.zeros_like(action)
             if self.preview_prior is not None and self.opening_period is not None:
@@ -1955,8 +1978,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             self.apply_idle_gravity(tokens, action, details, clock)
         if opening is not None and not observed:
             self.apply_lateral_motion(tokens, action, details, opening, continued)
-        if self.wall_poses is not None and not observed:
-            self.apply_wall_rotation(tokens, action, details, first_turn)
+        if self.wall_poses is not None and (not observed or wall_phase is not None):
+            self.apply_wall_rotation(tokens, action, details, first_turn, observed=observed)
         if self.visible_stack_guard is not None and not observed:
             self.keep_visible_stack(tokens, action, details)
         prediction = self.decode_scene(tokens, details, hard=True)
@@ -2021,6 +2044,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             memory[:, 0, -1, -3] = continued.to(memory)
         if self.preview_prior is not None:
             memory[:, 0, -1, -4] = preview_seed.to(memory)
+        if wall_phase is not None:
+            memory[:, 0, -1, -5] = details["wall_phase"].to(memory)
         return rendered, torch.cat((core, memory), dim=1)
 
     def _read_current(self, tokens, hidden, prior_state):
@@ -2204,7 +2229,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         use = (~free | (shift >= 0)) & (~due | can_drop)
         self.select_rendered_pose(details, active[use], pose[use], torch.zeros_like(pose[use]))
 
-    def apply_wall_rotation(self, tokens, action, details, first_turn=None):
+    def apply_wall_rotation(self, tokens, action, details, first_turn=None, *, observed=False):
         a, b = ACTIONS.index("a"), ACTIONS.index("b")
         rotating = (action == a) | (action == b)
         if not torch.onnx.is_in_onnx_export() and not rotating.any():
@@ -2231,6 +2256,13 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         if self.contact_rotations is not None:
             contact = self.contact_rotations[kind, (action[active] == b).long()]
             choice = torch.where((free[active] | witnessed_wall)[:, None], choice, contact)
+        phased = torch.zeros_like(near_wall)
+        if self.wall_phase_poses is not None:
+            phase = details["wall_phase"][active]
+            angle = phase % 4
+            reverse = (action[active] == b) ^ (phase >= 4)
+            phased = kind == self.wall_phase_shapes[angle]
+            choice = torch.where(phased[:, None], self.wall_phase_poses[angle, reverse.long()], choice)
         target, dy, dx = choice.long().unbind(1)
         y, x = row + dy, column + dx
         position = y.clamp(0, 17) * 10 + x.clamp(0, 9)
@@ -2241,11 +2273,18 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         board = tokens[active, :, 2:12].masked_fill(masks[current], self.blank_id)
         clear = (~masks[candidate] | (board == self.blank_id)).flatten(1).all(1)
         use = valid & clear
+        if self.wall_phase_poses is not None:
+            # A blocked turn flips the next turn direction while preserving the pivot.
+            turned = (angle + torch.where(reverse, -1, 1) * use.long()) % 4
+            phase_next = turned + 4 * (phase < 4).long()
+            details["wall_phase"] = details["wall_phase"].index_copy(0, active, torch.where(phased, phase_next, phase))
+        if observed:
+            return
         if self.preview_prior is not None:
             mode = details["mode"][active].argmax(1)
             full = torch.isin(tokens[active, :, 2:12], self.object_tiles).all(2).any(1)
             lock = (mode == 1) & (details["contact_neighbors"][active, 7] > 0)
-            blocked = near_wall & ~use & ~lock & ~full
+            blocked = (near_wall | phased) & ~use & ~lock & ~full
             proposed = details["next"]["joint"][active].flatten(1).argmax(1)
             vertical = (proposed == current + 10) & (row < 17) & self.valid_poses.flatten()[proposed]
             vertical = vertical & (~masks[proposed] | (board == self.blank_id)).flatten(1).all(1)
@@ -2679,7 +2718,8 @@ def scene_from_weights(weights):
                           weights.get("wall_poses"), weights.get("lateral_motion"), weights.get("wall_first_poses"),
                           weights.get("visible_stack_guard"), weights.get("held_wall_gravity"),
                           weights.get("gravity_spawn_poses"), weights.get("sustained_repeat"),
-                          weights.get("contact_rotations"), weights.get("preview_prior"), weights.get("free_rotations"))
+                          weights.get("contact_rotations"), weights.get("preview_prior"), weights.get("free_rotations"),
+                          weights.get("wall_phase_poses"))
         model = family(*arguments)
     if family is RelativeProposalSceneDynamics and "proposal_gate_calibration" not in weights:
         weights = {**weights, "proposal_gate_calibration": model.proposal_gate_calibration.detach()}
