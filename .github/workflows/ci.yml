@@ -1,0 +1,28 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -r requirements.txt playwright==1.51.0
+      - run: python -m unittest discover -q
+        env:
+          OMP_NUM_THREADS: '1'
+      - run: docker build -t functional-1:ci .
+      - run: python -m playwright install --with-deps chromium
+      - name: Check container and browser gameplay
+        run: |
+          docker run -d --name functional-1-ci -p 127.0.0.1:8765:8765 functional-1:ci
+          trap 'docker rm -f functional-1-ci' EXIT
+          curl -fsS --retry 15 --retry-delay 1 --retry-all-errors http://127.0.0.1:8765/health
+          python checks/browser.py
