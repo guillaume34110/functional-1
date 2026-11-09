@@ -69,7 +69,8 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(1)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    base = scene_from_weights(checkpoint).eval()
+    weights = checkpoint.get("model", checkpoint)
+    base = scene_from_weights(weights).eval()
     kinds = {}
     for i, (shape, token) in enumerate(zip(base.object_shapes, base.object_tiles, strict=True)):
         colors = np.flatnonzero((PATTERNS == base.codebook[token].numpy()).all((1, 2)))
@@ -96,19 +97,21 @@ def main():
                     first_votes[key][target] += 1
         elif row["split"] == "validation" and rows:
             validation.append((frames, actions, rows))
-    table = torch.zeros((len(base.object_shapes), 2, 10, 3, 3), dtype=torch.int16)
-    table[..., 0] = -1
-    learned = {key: next(iter(values)) for key, values in votes.items() if len(values) == 1}
+    empty = torch.zeros((len(base.object_shapes), 2, 10, 3, 3), dtype=torch.int16)
+    empty[..., 0] = -1
+    table = weights.get("wall_poses", empty).clone()
+    learned = {key: next(iter(values)) for key, values in votes.items()
+               if len(values) == 1 and table[key][0] < 0}
     if not learned or not validation:
         raise ValueError("wall corpus has no proved training and validation cases")
     for key, target in learned.items():
         table[key] = torch.tensor(target, dtype=table.dtype)
-    first = torch.zeros_like(table)
-    first[..., 0] = -1
-    learned_first = {key: next(iter(values)) for key, values in first_votes.items() if len(values) == 1}
+    first = weights.get("wall_first_poses", empty).clone()
+    learned_first = {key: next(iter(values)) for key, values in first_votes.items()
+                     if len(values) == 1 and first[key][0] < 0}
     for key, target in learned_first.items():
         first[key] = torch.tensor(target, dtype=table.dtype)
-    state = {**checkpoint["model"], "wall_poses": table, "wall_first_poses": first}
+    state = {**weights, "wall_poses": table, "wall_first_poses": first}
     candidate = scene_from_weights(state).eval()
     report = {"source_sha256": digest(args.checkpoint), "train_rotations": sum(sum(v.values()) for v in votes.values()),
               "learned_contexts": len(learned), "learned_first_contexts": len(learned_first),

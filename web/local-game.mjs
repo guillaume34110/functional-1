@@ -35,6 +35,8 @@ async function play() {
  ]);
  const render = config.native ? nativeRenderer(config.native.keys, config.native.tiles) : pixels => pixels;
  const initialFrame = unpack(config.initial_frame);
+ const levelFrames = config.level_frames?.map(unpack);
+ let level = 1;
  const pausePanel = config.pause ? unpack(config.pause.frame) : null;
  const title = config.title ? unpack(config.title) : null;
  const logo = title ? unpack(config.title_logo) : null;
@@ -54,7 +56,7 @@ async function play() {
  }
 
  function reset() {
-  pixels = initialFrame;
+  pixels = levelFrames?.[level - 1] ?? initialFrame;
   carry = seedState;
   phase = config.pause?.initial_phase ?? 0;
   suspended = false;
@@ -65,6 +67,7 @@ async function play() {
    steps,
    inference_ms: elapsed,
    menu: Boolean(menu),
+   level: levelFrames ? level : undefined,
    width: title ? 160 : 80,
    height: title ? 144 : 72,
   };
@@ -82,6 +85,11 @@ async function play() {
    if (config.starts[action]) {
     menu = null;
     reset();
+   } else if (levelFrames) {
+    const button = config.actions[action];
+    const change = button === "right" || button === "up" ? 1 :
+     button === "left" || button === "down" ? -1 : 0;
+    level = Math.max(1, Math.min(levelFrames.length, level + change));
    }
    return 0;
   }
@@ -119,7 +127,7 @@ async function play() {
    reset();
    menu = title;
    publish(menu ?? display(pixels), 0);
-  } else if (!paused && (!menu || pulses.length || held !== "noop")) {
+  } else if (!paused && (!menu || pulses.length)) {
    const action = config.actions.indexOf(pulses.shift() ?? held);
    const elapsed = await advance(action);
    publish(menu ?? display(suspended ? pausePanel : pixels), elapsed);

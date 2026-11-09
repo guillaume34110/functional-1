@@ -1930,6 +1930,14 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         positions = (rows * tokens.size(2) + cols).expand(tokens.size(0), -1)
         tokens = tokens.flatten(1).scatter(1, positions, legacy).reshape_as(tokens)
         details = self.scene_details(tokens, action, state)
+        if self.gravity_transition is not None:
+            offset = torch.zeros_like(action)
+            if self.preview_prior is not None and self.opening_period is not None:
+                level = digits[:, -2].remainder(10) * 10 + digits[:, -1]
+                level = torch.where((digits[:, -2:] >= 0).all(1) & (digits[:, -1] < 10), level, 1)
+                # The reference shortens the interval by three native frames per level.
+                offset = ((level - 1).clamp_min(0) * 3 // 4).clamp_max(self.opening_period - 1)
+            details["gravity_offset"] = offset
         if opening is not None or first_turn is not None:
             board = tokens[:, :, 2:12]
             first_piece = (board == self.blank_id).sum((1, 2)) == 176
@@ -2101,9 +2109,11 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         board = tokens[:, :, 2:12]
         ordinary = ((board == self.blank_id) | torch.isin(board, self.object_tiles)).flatten(1).all(1)
         held = details["state"][:, 18, 0, 0]
+        offset = details["gravity_offset"]
         idle = held > 1
         if opening is not None:
-            idle = idle | ((opening >= 0) & (self.gravity_transition[opening % self.opening_period] > 0))
+            tick = opening % (self.opening_period - offset) + offset
+            idle = idle | ((opening >= 0) & (self.gravity_transition[tick] > 0))
         quiet = action == ACTIONS.index("noop")
         delayed_drop = torch.zeros_like(quiet)
         if self.preview_prior is not None:
@@ -2126,8 +2136,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         mask = masks[current].bool()
         ages = details["state"][active, 17, :, 2:12].masked_fill(~mask, 255).amin((1, 2)).long()
         if opening is not None:
-            ages = torch.where(opening[active] >= 0, opening[active] % self.opening_period, ages)
-        due = (self.gravity_transition[ages] > 0) | resting[active]
+            ages = torch.where(opening[active] >= 0, opening[active] % (self.opening_period - offset[active]), ages)
+        due = (self.gravity_transition[(ages + offset[active]).clamp_max(255)] > 0) | resting[active]
         supported = details["contact_neighbors"][active, 7] > 0
         drop = current + 10
         valid_drop = (current % 180 < 170) & self.valid_poses.flatten()[drop.clamp_max(len(masks) - 1)]
@@ -2181,11 +2191,12 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         shifted = kind * 180 + y * 10 + requested.clamp(0, 9)
         free = free & ((~masks[shifted] | (background == self.blank_id)).flatten(1).all(1))
         x = torch.where((shift == 1) & free, requested, x)
-        elapsed = age[active] % self.opening_period
+        offset = details["gravity_offset"][active]
+        elapsed = age[active] % (self.opening_period - offset)
         if self.preview_prior is not None and self.sustained_repeat is not None:
             ages = details["state"][active, 17, :, 2:12].masked_fill(~masks[current], 255).amin((1, 2)).long()
             elapsed = torch.where(repeat[active], ages, elapsed)
-        due = self.gravity_transition[elapsed] > 0
+        due = self.gravity_transition[(elapsed + offset).clamp_max(255)] > 0
         drop = kind * 180 + (y + 1).clamp_max(17) * 10 + x
         can_drop = (y < 17) & self.valid_poses.flatten()[drop]
         can_drop = can_drop & ((~masks[drop] | (background == self.blank_id)).flatten(1).all(1))
@@ -2207,17 +2218,19 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         current = details["current"]["joint"][active].flatten(1).argmax(1)
         kind, position = current // 180, current % 180
         row, column = position // 10, position % 10
+        near_wall = (column <= 1) | (column + self.object_shapes[kind, :, 1].amax(1) >= 8)
         key = kind, (action[active] == b).long(), column, row.clamp_max(2)
         choice = self.wall_poses[key]
         if first_turn is not None:
             first = self.wall_first_poses[key]
             choice = torch.where((first_turn[active] & (first[:, 0] >= 0))[:, None], first, choice)
+        witnessed_wall = near_wall & (choice[:, 0] >= 0)
         if self.free_rotations is not None:
             fallback = self.free_rotations[kind, (action[active] == b).long()]
             choice = torch.where((choice[:, 0] < 0)[:, None], fallback, choice)
         if self.contact_rotations is not None:
             contact = self.contact_rotations[kind, (action[active] == b).long()]
-            choice = torch.where(free[active, None], choice, contact)
+            choice = torch.where((free[active] | witnessed_wall)[:, None], choice, contact)
         target, dy, dx = choice.long().unbind(1)
         y, x = row + dy, column + dx
         position = y.clamp(0, 17) * 10 + x.clamp(0, 9)
@@ -2228,6 +2241,17 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         board = tokens[active, :, 2:12].masked_fill(masks[current], self.blank_id)
         clear = (~masks[candidate] | (board == self.blank_id)).flatten(1).all(1)
         use = valid & clear
+        if self.preview_prior is not None:
+            mode = details["mode"][active].argmax(1)
+            full = torch.isin(tokens[active, :, 2:12], self.object_tiles).all(2).any(1)
+            lock = (mode == 1) & (details["contact_neighbors"][active, 7] > 0)
+            blocked = near_wall & ~use & ~lock & ~full
+            proposed = details["next"]["joint"][active].flatten(1).argmax(1)
+            vertical = (proposed == current + 10) & (row < 17) & self.valid_poses.flatten()[proposed]
+            vertical = vertical & (~masks[proposed] | (board == self.blank_id)).flatten(1).all(1)
+            fallback = torch.where(vertical, proposed, current)
+            candidate = torch.where(blocked, fallback, candidate)
+            use = use | blocked
         self.select_rendered_pose(details, active[use], candidate[use], torch.zeros_like(candidate[use]))
 
     def select_rendered_pose(self, details, active, pose, mode):

@@ -3,6 +3,7 @@ import base64
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from model import ACTIONS
 from native_render import NativeRenderer
@@ -10,6 +11,8 @@ from play import NeuralSession
 
 
 class FunctionalTwoSession(NeuralSession):
+    levels = tuple(range(1, 10))
+
     def __init__(self, release: Path):
         self.renderer = NativeRenderer(release / "native-render.npz")
         with np.load(release / "menus.npz", allow_pickle=False) as bundle:
@@ -22,7 +25,17 @@ class FunctionalTwoSession(NeuralSession):
         self.title_frame = base64.b64encode(self.title.tobytes()).decode()
         self.starts = transitions[0] == 1
         self.title_logo = self.title[1:118:2, 1::2]
+        self.level = self.levels[0]
         super().__init__(release / "model.pt", release / "first-piece.npz")
+
+    def frame_for_level(self, level):
+        frame = torch.from_numpy(self.frames[-1].copy())[None, None]
+        if level == 1:
+            return frame
+        with torch.inference_mode():
+            digits = self.model.counter.read(frame)
+            digits[:, -1] = level
+            return self.model.counter.paint(frame, digits, torch.tensor([True]))
 
     def reset(self):
         self.previous_low = None
@@ -45,6 +58,7 @@ class FunctionalTwoSession(NeuralSession):
         return {"frame": encoded,
                 "width": 160, "height": 144, "release": "Functional 2",
                 "menu": self.menu_screen is not None,
+                "level": self.level,
                 "steps": self.steps, "inference_ms": elapsed}
 
     def step(self, action):
@@ -54,5 +68,9 @@ class FunctionalTwoSession(NeuralSession):
             raise ValueError("unknown action")
         if self.starts[ACTIONS.index(action)]:
             self.menu_screen = None
-            return super().reset()
+            super().reset()
+            self.frame = self.frame_for_level(self.level)
+        elif action in ("left", "down", "right", "up"):
+            change = 1 if action in ("right", "up") else -1
+            self.level = min(max(self.level + change, self.levels[0]), self.levels[-1])
         return self.result(0.0)

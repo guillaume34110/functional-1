@@ -44,6 +44,7 @@ dl{margin:0}dt,dd{margin:.55rem 0;display:inline-block}dt{width:46%;color:#d3c9e
 <section class="shell" aria-label="Game display">
 <div class="bezel"><canvas id="screen" width="80" height="72" aria-label="Neural falling-block game screen"></canvas></div>
 <p id="status" role="status">Loading the model…</p>
+<p id="starting-level" hidden>Starting level <output aria-live="polite">1</output> · Use the arrow keys</p>
 <div class="touch" aria-label="Touch controls">
 <button data-action="left" aria-label="Move left">←</button>
 <button data-action="down" aria-label="Soft drop">↓</button>
@@ -73,7 +74,7 @@ dl{margin:0}dt,dd{margin:.55rem 0;display:inline-block}dt{width:46%;color:#d3c9e
 </main>
 <script>
 const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d'),status=document.querySelector('#status');
-let held=[],pulses=[],busy=false,paused=false,resetRequested=false,menu=false;
+let held=[],pulses=[],busy=false,paused=false,resetRequested=false,menu=false,levelMenu=false;
 const buttons={ArrowLeft:'left',ArrowRight:'right',ArrowDown:'down',ArrowUp:'up',z:'a',x:'b',Enter:'start'};
 const discrete=new Set(['a','b','start']);
 const streaming=false;
@@ -91,8 +92,9 @@ function setPaused(value){
  document.querySelector('#pause').textContent=paused?"Resume":"Pause";
 }
 function press(action){
- if(menu&&(action==='a'||action==='start'))setPaused(false);
- if(discrete.has(action)){if(liveInput)send(action);else pulses.push(action)}
+ const selectLevel=levelMenu&&['left','right','up','down'].includes(action);
+ if(selectLevel||(menu&&(action==='a'||action==='start')))setPaused(false);
+ if(selectLevel||discrete.has(action)){if(liveInput)send(action);else pulses.push(action)}
  else if(!held.includes(action)){held.push(action);send(action)}
 }
 function release(action){held=held.filter(x=>x!==action);send()}
@@ -123,6 +125,10 @@ function draw(data){
   document.title=data.release+' · Neural Tetris';document.querySelector('header strong').textContent=data.release;document.querySelector('#release').textContent=data.release
  }
  menu=data.menu===true;
+ levelMenu=menu&&Number.isInteger(data.level);
+ const level=document.querySelector('#starting-level');
+ level.hidden=!levelMenu;
+ if(levelMenu)level.querySelector('output').value=data.level;
  document.querySelector('#start-game').hidden=!menu;
  status.textContent=menu?'Press Z or Enter to play':`${data.steps} neural steps · ${data.inference_ms.toFixed(1)} ms / step`;}
 async function request(path,body){let response=await fetch(location.pathname.replace(/\/+$/,'')+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -137,7 +143,7 @@ if(worker){
  socket.onopen=()=>send();
  socket.onmessage=event=>draw(JSON.parse(event.data));
  socket.onclose=()=>{status.textContent="Connection closed. Reload to reconnect."};
-}else setInterval(async()=>{if(busy||(!resetRequested&&(paused||(menu&&!pulses.length&&!held.length))))return;
+}else setInterval(async()=>{if(busy||(!resetRequested&&(paused||(menu&&!pulses.length))))return;
  const reset=resetRequested;resetRequested=false;busy=true;
  try{draw(reset?await request('/reset',{}):await request('/step',{action:pulses.shift()??held.at(-1)??'noop'}))}
  catch(e){paused=true;status.textContent=e.message}finally{busy=false}},1000/15);

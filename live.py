@@ -94,7 +94,7 @@ def serve(site, host, port):
                 await send(game.result(0.0))
             deadline = loop.time()
             while not ws.closed:
-                ticking = not paused and (game.menu_screen is None or pulses or held != "noop")
+                ticking = not paused and (game.menu_screen is None or pulses)
                 remaining = deadline - loop.time()
                 if ticking and remaining <= 0:
                     deadline = loop.time() + TICK
