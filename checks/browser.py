@@ -8,9 +8,15 @@ with sync_playwright() as playwright:
     page = browser.new_page()
     page.goto(os.environ.get("GAME_URL", "http://127.0.0.1:8765/"))
     expect(page.locator("#status")).to_contain_text("neural steps")
+    held_steps = []
+    with page.expect_request("**/step"):
+        page.route("**/step", lambda route: held_steps.append(route))
     page.get_by_role("button", name="Pause", exact=True).click()
     expect(page.get_by_role("button", name="Resume")).to_be_visible()
     page.get_by_role("button", name="Restart").click()
+    assert len(held_steps) == 1
+    held_steps[0].continue_()
+    page.unroute("**/step")
     expect(page.locator("#status")).to_contain_text("0 neural steps")
     page.get_by_role("button", name="Resume").click()
     with page.expect_response(lambda response: response.url.endswith("/step")
