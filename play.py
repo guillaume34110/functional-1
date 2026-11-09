@@ -83,25 +83,41 @@ class NeuralSession:
         return self.result((time.perf_counter() - started) * 1000)
 
 
-def handler_for(session, *, public=False):
+def handler_for(session, *, public=False, comparison=None):
     games = OrderedDict()
+    versions = {"": (session, "tetris_v2" if comparison is not None else "functional1")}
+    if comparison is not None:
+        versions["/v1"] = comparison, "tetris_v1"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
 
         def do_GET(self):
-            if self.path not in ("/", "/health"):
+            path = self.path.split("?", 1)[0].rstrip("/")
+            if path != "/health" and path not in versions:
                 self.send_error(404); return
-            body = b"ok\n" if self.path == "/health" else PAGE.encode()
+            page = PAGE
+            if comparison is not None:
+                v1 = path == "/v1"
+                if not v1:
+                    page = page.replace("Functional 1", "Functional 2")
+                v1_current = ' aria-current="page"' if v1 else ""
+                v2_current = "" if v1 else ' aria-current="page"'
+                page = page.replace("<!-- versions -->", f'<nav aria-label="Game version">'
+                                    f'<a href="/"{v2_current}>V2</a> '
+                                    f'<a href="/v1"{v1_current}>V1</a></nav>')
+            body = b"ok\n" if path == "/health" else page.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers(); self.wfile.write(body)
 
         def do_POST(self):
             try:
-                if self.path not in ("/step", "/reset"):
+                prefix, _, command = self.path.rpartition("/")
+                if prefix not in versions or command not in ("step", "reset"):
                     self.send_error(404)
                     return
                 if public and self.headers.get_content_type() != "application/json":
@@ -111,11 +127,11 @@ def handler_for(session, *, public=False):
                 if not 0 <= length <= 256:
                     raise ValueError("request too large")
                 payload = json.loads(self.rfile.read(length))
-                action = payload["action"] if self.path == "/step" else None
-                if self.path == "/step" and action not in ACTIONS:
+                action = payload["action"] if command == "step" else None
+                if command == "step" and action not in ACTIONS:
                     raise ValueError("unknown action")
-                game, cookie = self.game()
-                if self.path == "/step":
+                game, cookie = self.game(prefix)
+                if command == "step":
                     result = game.step(action)
                 else:
                     result = game.reset()
@@ -130,24 +146,26 @@ def handler_for(session, *, public=False):
             except (ValueError, KeyError, TypeError, CookieError):
                 self.send_error(400, "invalid command")
 
-        def game(self):
+        def game(self, prefix):
+            template, name = versions[prefix]
             if not public:
-                return session, None
+                return template, None
             now = time.monotonic()
             while games and now - next(iter(games.values()))[0] > 300:
                 games.popitem(last=False)
-            token = SimpleCookie(self.headers.get("Cookie", "")).get("functional1")
-            if token and token.value in games:
-                _, game = games.pop(token.value)
-                games[token.value] = now, game
+            token = SimpleCookie(self.headers.get("Cookie", "")).get(name)
+            key = (name, token.value) if token else None
+            if key in games:
+                _, game = games.pop(key)
+                games[key] = now, game
                 return game, None
             if len(games) >= 32:
                 games.popitem(last=False)
-            key = token_urlsafe(24)
-            game = copy(session)
+            token = token_urlsafe(24)
+            game = copy(template)
             game.reset()
-            games[key] = now, game
-            cookie = f"functional1={key}; Path=/; HttpOnly; SameSite=Strict"
+            games[name, token] = now, game
+            cookie = f"{name}={token}; Path={prefix or '/'}; HttpOnly; SameSite=Strict"
             if self.headers.get("X-Forwarded-Proto") == "https":
                 cookie += "; Secure"
             return game, cookie
@@ -158,12 +176,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weights", type=Path, default=RELEASE / "model.pt")
     parser.add_argument("--seed", type=Path, default=RELEASE / "first-piece.npz")
+    parser.add_argument("--functional-2", type=Path, metavar="RELEASE")
+    parser.add_argument("--compare", action="store_true", help="serve Functional 1 at /v1")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     torch.set_num_threads(1)
-    session = NeuralSession(args.weights, args.seed)
-    server = HTTPServer((args.host, args.port), handler_for(session, public=True))
+    if args.compare and args.functional_2 is None:
+        parser.error("--compare requires --functional-2")
+    if args.functional_2 is None:
+        session = NeuralSession(args.weights, args.seed)
+    else:
+        from functional_two import FunctionalTwoSession
+
+        session = FunctionalTwoSession(args.functional_2)
+    comparison = NeuralSession(args.weights, args.seed) if args.compare else None
+    server = HTTPServer((args.host, args.port), handler_for(session, public=True, comparison=comparison))
     print(f"http://{args.host}:{args.port} — Ctrl-C to close", flush=True)
     try:
         server.serve_forever()
