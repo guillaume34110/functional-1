@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Functional 1 · Neural Tetris</title>
+<style>
+:root{color-scheme:dark;--ink:#111121;--paper:#e9e2fa;--signal:#f2fb4b;--line:#494461}
+*{box-sizing:border-box}
+body{margin:0;color:#e9e2fa;font:16px/1.55 ui-monospace,monospace;background-color:#101020;background-image:repeating-linear-gradient(0deg,transparent 0 31px,#1c1c33 31px 32px),repeating-linear-gradient(90deg,#101020 0 31px,#1c1c33 31px 32px)}
+header{display:flex;align-items:center;gap:1rem;border-bottom:1px solid var(--line);padding:1rem max(1.5rem,calc((100vw - 1200px)/2));background:var(--ink);font-size:.8rem;text-transform:uppercase;letter-spacing:.12em}
+header strong{background:var(--signal);color:var(--ink);padding:.35rem .65rem;white-space:nowrap}
+main{display:grid;grid-template-columns:minmax(12rem,.75fr) minmax(0,1.4fr) minmax(13rem,.7fr);gap:clamp(1rem,3vw,2.5rem);align-items:start;max-width:1248px;margin:0 auto;padding:clamp(1.5rem,5vw,4rem) 1.5rem}
+h1{font-size:clamp(2.3rem,4.8vw,4.5rem);letter-spacing:-.085em;line-height:.94;margin:.45em 0 .35em}
+h2{font-size:.84rem;letter-spacing:.1em;text-transform:uppercase;color:#f2fb4b;background-color:#111121;margin:0 0 .8rem}
+.eyebrow{color:#f2fb4b;background-color:#101020;text-transform:uppercase;letter-spacing:.16em;font-size:.72rem}
+.muted{color:#d3c9e5;background-color:#101020;font-size:.88rem}
+.shell{background:#302d43;border:1px solid #716985;border-radius:1.3rem;padding:clamp(.8rem,2vw,1.6rem);box-shadow:0 12px 0 #0c0b18}
+.bezel{background:#161626;border-radius:.8rem;padding:clamp(.6rem,1.8vw,1.2rem)}
+canvas{display:block;width:100%;height:auto;background:#c5e7a1;border-radius:.3rem;image-rendering:pixelated}
+#status{font-size:.73rem;color:#d3c9e5;margin:.8rem 0 0}
+.card{border:1px solid var(--line);background-color:#111121;color:#e9e2fa;padding:1rem;margin-bottom:1rem;border-radius:.55rem}
+.controls{display:flex;gap:.55rem;flex-wrap:wrap}
+button,kbd{font:inherit;border:1px solid #8d81aa;border-radius:.25rem;padding:.22rem .45rem;background:#2d2944;color:var(--paper)}
+button{cursor:pointer;padding:.52rem .75rem}
+button:first-child{background:var(--signal);color:var(--ink);border-color:var(--signal);font-weight:bold}
+button:focus-visible{outline:2px solid white;outline-offset:4px}
+.touch{display:none;margin-top:1rem}
+.touch button{min-width:44px;min-height:44px;touch-action:none;user-select:none}
+@media(pointer:coarse){.touch{display:flex;flex-wrap:wrap;gap:.5rem}}
+dl{margin:0}dt,dd{margin:.55rem 0;display:inline-block}dt{width:46%;color:#d3c9e5}dd{font-weight:bold}
+@media(max-width:900px){main{grid-template-columns:minmax(0,1.4fr) minmax(12rem,.7fr)}.intro{grid-column:1/-1}}
+@media(max-width:600px){main{grid-template-columns:minmax(0,1fr)}.intro{grid-column:auto}}
+</style>
+<header><strong>Functional 1</strong><span>Neural game engine</span></header>
+<main>
+<section class="intro">
+<p class="eyebrow">Playable research prototype</p>
+<h1>Falling<br>blocks.</h1>
+<p class="muted">Your controls and the current screen drive a compact model that generates the next frame.</p>
+</section>
+<section class="shell" aria-label="Game display">
+<div class="bezel"><canvas id="screen" width="80" height="72" aria-label="Neural falling-block game screen"></canvas></div>
+<p id="status" role="status">Loading the model…</p>
+<div class="touch" aria-label="Touch controls">
+<button data-action="left" aria-label="Move left">←</button>
+<button data-action="down" aria-label="Soft drop">↓</button>
+<button data-action="right" aria-label="Move right">→</button>
+<button data-action="a" aria-label="Rotate with A">Z</button>
+<button data-action="b" aria-label="Rotate with B">X</button>
+<button data-action="start" aria-label="In-game pause">Ⅱ</button>
+</div>
+</section>
+<aside>
+<section class="card">
+<h2>Game controls</h2>
+<div class="controls"><button id="pause">Pause</button><button id="reset">Restart</button></div>
+</section>
+<section class="card">
+<h2>Keyboard</h2>
+<p><kbd>←</kbd> <kbd>→</kbd> Move</p>
+<p><kbd>↓</kbd> Soft drop</p>
+<p><kbd>Z</kbd> <kbd>X</kbd> Rotate</p>
+<p><kbd>Enter</kbd> In-game pause</p>
+</section>
+<section class="card">
+<h2>Model</h2>
+<dl><dt>Release</dt><dd>Functional 1</dd><dt>Checkpoint</dt><dd>330 kB</dd><dt>Input rate</dt><dd>15 Hz</dd></dl>
+</section>
+</aside>
+</main>
+<script>
+const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d'),status=document.querySelector('#status');
+let held=[],pulses=[],busy=false,paused=false;
+const buttons={ArrowLeft:'left',ArrowRight:'right',ArrowDown:'down',ArrowUp:'up',z:'a',x:'b',Enter:'start'};
+const discrete=new Set(['a','b','start']);
+window.addEventListener('keydown',e=>{
+ const a=buttons[e.key];if(!a)return;e.preventDefault();
+ if(discrete.has(a)){if(!e.repeat)pulses.push(a)}
+ else if(!held.includes(a))held.push(a);
+});
+window.addEventListener('keyup',e=>{let a=buttons[e.key];if(a){e.preventDefault();held=held.filter(x=>x!==a)}});
+for(const key of document.querySelectorAll('[data-action]')){
+ const action=key.dataset.action;
+ if(discrete.has(action)){key.onclick=()=>pulses.push(action);continue}
+ key.onpointerdown=e=>{key.setPointerCapture(e.pointerId);if(!held.includes(action))held.push(action)};
+ key.onlostpointercapture=()=>{held=held.filter(x=>x!==action)};
+}
+window.addEventListener('blur',()=>{held=[];pulses=[];paused=true;document.querySelector('#pause').textContent="Resume"});
+function draw(data){let raw=atob(data.frame),image=ctx.createImageData(80,72);for(let i=0;i<raw.length;i++){
+ const shade=[[20,42,37,255],[62,103,79,255],[134,182,125,255],[197,231,161,255]][raw.charCodeAt(i)];image.data.set(shade,i*4)}ctx.putImageData(image,0,0);
+ status.textContent=`${data.steps} neural steps · ${data.inference_ms.toFixed(1)} ms / step`;}
+async function request(path,body){let response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(!response.ok)throw Error(await response.text());return response.json()}
+document.querySelector('#pause').onclick=e=>{paused=!paused;e.target.textContent=paused?"Resume":"Pause"};
+document.querySelector('#reset').onclick=async()=>{if(busy)return;busy=true;held=[];pulses=[];try{draw(await request('/reset',{}))}catch(e){status.textContent=e.message}finally{busy=false}};
+setInterval(async()=>{if(paused||busy)return;busy=true;try{draw(await request('/step',{action:pulses.shift()??held.at(-1)??'noop'}))}
+ catch(e){paused=true;status.textContent=e.message}finally{busy=false}},1000/15);
+</script>
+</html>

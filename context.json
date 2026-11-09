@@ -1,0 +1,20 @@
+{
+  "id": "neural-tetris-adjustris-v2",
+  "objective": "replace the emulator with action-conditioned learned screen dynamics",
+  "status": "training-ready",
+  "model": {"family": "spatial-convgru", "parameters": 9776, "copy_skip_logits": 2.0},
+  "rom": {
+    "file": "roms/adjustris-v1.1.gb",
+    "url": "https://github.com/tbsp/Adjustris/releases/download/v1.1/adjustris.gb",
+    "source": "https://github.com/tbsp/Adjustris",
+    "license": "CC0-1.0",
+    "bytes": 32768,
+    "sha256": "b6c8affe6d906419cfc99ff459718f33a1868af03254a2f65cea2a9430394712"
+  },
+  "observation": {"native_wh": [160, 144], "model_wh": [80, 72], "channels": 1, "classes": 4, "dtype": "uint8", "resize": "nearest", "privileged_state": false},
+  "actions": ["noop", "left", "right", "down", "a", "b", "start", "up"],
+  "frames_per_action": 4,
+  "memory": {"type": "ConvGRU", "shape_chw": [8, 18, 20], "reset": "episode boundary"},
+  "dataset": {"unit": "complete episode", "alignment": "frames[t], actions[t], context -> frames[t+1]", "split": "80/10/10 by independent run and initial RNG, before windowing", "window": 64, "burn_in": 16},
+  "training": {"target": "next screen", "loss": "per-pixel categorical cross entropy with changed-pixel weighting plus autoregressive multistep loss", "test": "held-out autoregressive replay under supplied actions; piece motion, rotation, locking, clearing, top-out, gravity and input timing"}
+}
