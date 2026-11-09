@@ -21,7 +21,7 @@ RUN (cd releases/functional-1 && sha256sum -c SHA256SUMS) && \
     gzip -k /site/models/*.onnx
 
 FROM nginxinc/nginx-unprivileged:1.28-alpine
-COPY web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY web/nginx.conf /etc/nginx/nginx.conf
 COPY --from=export /site/ /usr/share/nginx/html/
 COPY --from=browser-runtime /runtime/package/dist/ /usr/share/nginx/html/vendor/
 EXPOSE 8765
