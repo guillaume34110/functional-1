@@ -70,7 +70,7 @@ dl{margin:0}dt,dd{margin:.55rem 0;display:inline-block}dt{width:46%;color:#d3c9e
 </main>
 <script>
 const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d'),status=document.querySelector('#status');
-let held=[],pulses=[],busy=false,paused=false;
+let held=[],pulses=[],busy=false,paused=false,resetRequested=false;
 const buttons={ArrowLeft:'left',ArrowRight:'right',ArrowDown:'down',ArrowUp:'up',z:'a',x:'b',Enter:'start'};
 const discrete=new Set(['a','b','start']);
 window.addEventListener('keydown',e=>{
@@ -92,8 +92,10 @@ function draw(data){let raw=atob(data.frame),image=ctx.createImageData(80,72);fo
 async function request(path,body){let response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw Error(await response.text());return response.json()}
 document.querySelector('#pause').onclick=e=>{paused=!paused;e.target.textContent=paused?"Resume":"Pause"};
-document.querySelector('#reset').onclick=async()=>{if(busy)return;busy=true;held=[];pulses=[];try{draw(await request('/reset',{}))}catch(e){status.textContent=e.message}finally{busy=false}};
-setInterval(async()=>{if(paused||busy)return;busy=true;try{draw(await request('/step',{action:pulses.shift()??held.at(-1)??'noop'}))}
+document.querySelector('#reset').onclick=()=>{held=[];pulses=[];resetRequested=true};
+setInterval(async()=>{if(busy||(paused&&!resetRequested))return;
+ const reset=resetRequested;resetRequested=false;busy=true;
+ try{draw(reset?await request('/reset',{}):await request('/step',{action:pulses.shift()??held.at(-1)??'noop'}))}
  catch(e){paused=true;status.textContent=e.message}finally{busy=false}},1000/15);
 </script>
 </html>
