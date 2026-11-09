@@ -43,6 +43,15 @@ async function play() {
    [1, config.initial_state[0].length, 18, 20])
   : null;
  let pixels, carry, phase, suspended, menu, steps, previous;
+ let renderedPixels, renderedFrame;
+ function display(frame) {
+  if (!config.native) return frame;
+  if (!renderedPixels || frame.some((value, index) => value !== renderedPixels[index])) {
+   renderedPixels = frame;
+   renderedFrame = render(frame);
+  }
+  return renderedFrame;
+ }
 
  function reset() {
   pixels = initialFrame;
@@ -59,7 +68,7 @@ async function play() {
    width: title ? 160 : 80,
    height: title ? 144 : 72,
   };
-  if (!previous || image.some((value, index) => value !== previous[index])) {
+  if (image !== previous && (!previous || image.some((value, index) => value !== previous[index]))) {
    previous = image;
    update.frame = new Uint8Array(image);
    postMessage(update, [update.frame.buffer]);
@@ -93,7 +102,7 @@ async function play() {
    pixels = next.pixels.data;
    carry = next.carry;
    phase = next.phase ? Number(next.phase.data[0]) : 0;
-   if (logo?.every((value, index) => value === pixels[index])) menu = render(pixels);
+   if (logo?.every((value, index) => value === pixels[index])) menu = display(pixels);
   }
   steps++;
   return performance.now() - started;
@@ -101,20 +110,24 @@ async function play() {
 
  reset();
  menu = title;
- publish(menu ?? render(pixels), 0);
+ publish(menu ?? display(pixels), 0);
+ let deadline = performance.now();
  async function update() {
   const started = performance.now();
   if (restart) {
    restart = false;
    reset();
    menu = title;
-   publish(menu ?? render(pixels), 0);
+   publish(menu ?? display(pixels), 0);
   } else if (!paused && (!menu || pulses.length || held !== "noop")) {
    const action = config.actions.indexOf(pulses.shift() ?? held);
    const elapsed = await advance(action);
-   publish(menu ?? render(suspended ? pausePanel : pixels), elapsed);
+   publish(menu ?? display(suspended ? pausePanel : pixels), elapsed);
   }
-  setTimeout(() => update().catch(fail), Math.max(0, tick - (performance.now() - started)));
+  const now = performance.now();
+  // Preserve the clock phase without accumulating missed ticks after a slow inference.
+  deadline = version === "v2" ? Math.max(deadline + tick, now) : started + tick;
+  setTimeout(() => update().catch(fail), Math.max(0, deadline - now));
  }
  await update();
 }

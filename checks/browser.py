@@ -44,7 +44,20 @@ with sync_playwright() as playwright:
 
     context.set_offline(True)
     before = len(requests)
+    page.evaluate("window.dispatchEvent(new Event('blur'))")
+    expect(page.get_by_role("button", name="Resume")).to_be_visible()
+    play = page.get_by_role("button", name="Play", exact=True)
+    play.focus()
     page.keyboard.press("Enter")
+    expect(play).to_be_hidden()
+    wait_steps(page, 2)
+    preview = """canvas => Array.from(canvas.getContext('2d').getImageData(104, 0, 48, 48).data).join(',')"""
+    first_preview = canvas.evaluate(preview)
+    page.keyboard.press("z")
+    wait_steps(page, 5)
+    page.keyboard.press("x")
+    wait_steps(page, 8)
+    assert canvas.evaluate(preview) == first_preview
     cadence(page, "V2", 10)
     image = canvas.evaluate("(canvas) => canvas.toDataURL()")
     page.keyboard.press("Enter")
@@ -66,7 +79,8 @@ with sync_playwright() as playwright:
     assert requests[before:] == [], requests[before:]
 
     context.set_offline(False)
-    page.get_by_role("link", name="V1", exact=True).click()
+    page.get_by_role("link", name="V1", exact=True).focus()
+    page.keyboard.press("Enter")
     expect(page).to_have_url(URL + "/v1")
     expect(page.get_by_role("link", name="V1", exact=True)).to_have_attribute("aria-current", "page")
     expect(status).to_have_text(STEPS, timeout=60000)
