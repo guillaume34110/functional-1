@@ -77,13 +77,17 @@ let held=[],pulses=[],busy=false,paused=false,resetRequested=false,menu=false;
 const buttons={ArrowLeft:'left',ArrowRight:'right',ArrowDown:'down',ArrowUp:'up',z:'a',x:'b',Enter:'start'};
 const discrete=new Set(['a','b','start']);
 const streaming=false;
+const browserLocal=false;
+const worker=browserLocal?new Worker('/local-game.mjs?version='+(location.pathname.startsWith('/v1')?'v1':'v2'),{type:'module'}):null;
+const liveInput=streaming||browserLocal;
 const socket=streaming?new WebSocket(new URL('/stream',location.href).href.replace(/^http/,'ws')):null;
 function send(pulse,reset){
- if(socket?.readyState===WebSocket.OPEN)
-  socket.send(JSON.stringify({held:held.at(-1)??'noop',paused,pulse,reset}));
+ const input={held:held.at(-1)??'noop',paused,pulse,reset};
+ if(worker)worker.postMessage(input);
+ else if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(input));
 }
 function press(action){
- if(discrete.has(action)){if(streaming)send(action);else pulses.push(action)}
+ if(discrete.has(action)){if(liveInput)send(action);else pulses.push(action)}
  else if(!held.includes(action)){held.push(action);send(action)}
 }
 function release(action){held=held.filter(x=>x!==action);send()}
@@ -104,8 +108,9 @@ function draw(data){
   const width=data.width??80,height=data.height??72;
   if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height}
   const shades=[[20,42,37,255],[62,103,79,255],[134,182,125,255],[197,231,161,255]];
-  const raw=atob(data.frame),image=ctx.createImageData(width,height);
-  for(let i=0;i<raw.length;i++)image.data.set(shades[raw.charCodeAt(i)],i*4);
+  const raw=typeof data.frame==='string'?Uint8Array.from(atob(data.frame),value=>value.charCodeAt(0)):data.frame;
+  const image=ctx.createImageData(width,height);
+  for(let i=0;i<raw.length;i++)image.data.set(shades[raw[i]],i*4);
   ctx.putImageData(image,0,0);
  }
  if(data.release&&document.querySelector('#release').textContent!==data.release){
@@ -116,8 +121,11 @@ function draw(data){
 async function request(path,body){let response=await fetch(location.pathname.replace(/\/+$/,'')+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw Error(await response.text());return response.json()}
 document.querySelector('#pause').onclick=e=>{paused=!paused;e.target.textContent=paused?"Resume":"Pause";send()};
-document.querySelector('#reset').onclick=()=>{held=[];pulses=[];if(streaming)send(undefined,true);else resetRequested=true};
-if(socket){
+document.querySelector('#reset').onclick=()=>{held=[];pulses=[];if(liveInput)send(undefined,true);else resetRequested=true};
+if(worker){
+ worker.onmessage=({data})=>{if(data.error)status.textContent=data.error;else draw(data)};
+ worker.onerror=event=>{status.textContent=event.message||'Could not start the browser model.'};
+}else if(socket){
  socket.onopen=()=>send();
  socket.onmessage=event=>draw(JSON.parse(event.data));
  socket.onclose=()=>{status.textContent="Connection closed. Reload to reconnect."};

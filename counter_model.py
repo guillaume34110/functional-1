@@ -52,9 +52,10 @@ class CounterReadout(nn.Module):
     def paint(self, frames, digits, use):
         grid = self.patches(frames)
         existing = grid[:, self.rows, self.columns]
-        grid[:, self.rows, self.columns] = torch.where(use[:, None, None, None],
-                                                     self.glyphs[digits.clamp_min(0)], existing)
-        return frames
+        glyphs = torch.where(use[:, None, None, None], self.glyphs[digits.clamp_min(0)], existing)
+        positions = (self.rows * grid.size(2) + self.columns)[None, :, None, None].expand_as(glyphs)
+        painted = grid.flatten(1, 2).scatter(1, positions, glyphs).reshape_as(grid)
+        return painted.permute(0, 1, 3, 2, 4).reshape_as(frames)
 
     def digit_logits(self, digits, addends, carry):
         features = torch.cat((F.one_hot(digits, 11), F.one_hot(addends, 10), carry[..., None]), dim=-1)
@@ -62,14 +63,14 @@ class CounterReadout(nn.Module):
 
     def add(self, digits, addends):
         carry = torch.zeros_like(digits[..., 0])
-        result = torch.empty_like(digits)
+        result = []
         for column in range(digits.size(-1) - 1, -1, -1):
             decoded = self.digit_logits(digits[..., column], addends[..., column], carry).argmax(-1)
-            result[..., column] = decoded % 11
+            result.append(decoded % 11)
             carry = decoded // 11
             if column == digits.size(-1) - 1:
                 units_carry = carry
-        return result, units_carry
+        return torch.stack(result[::-1], dim=-1), units_carry
 
     def forward(self, digits, features):
         return self.apply_code(digits, self.events(features).argmax(1))
@@ -83,7 +84,7 @@ class CounterReadout(nn.Module):
     def consume(self, digits, pending, code):
         delayed = self.delay(code)[:, 0] > 0
         for event in (pending, code.masked_fill(delayed, 0)):
-            active = event.nonzero().flatten()
-            if len(active):
-                digits = digits.index_copy(0, active, self.apply_code(digits[active], event[active]))
+            active = event[:, None] != 0
+            updated = self.apply_code(digits.masked_fill(~active, 0), event)
+            digits = torch.where(active, updated, digits)
         return digits, code.masked_fill(~delayed, 0)
