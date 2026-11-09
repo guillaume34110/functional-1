@@ -83,11 +83,57 @@ class NeuralSession:
         return self.result((time.perf_counter() - started) * 1000)
 
 
+class GameSite:
+    def __init__(self, session, comparison):
+        self.games = OrderedDict()
+        self.active = set()
+        self.versions = {"": (session, "tetris_v2" if comparison is not None else "functional1")}
+        if comparison is not None:
+            self.versions["/v1"] = comparison, "tetris_v1"
+
+    def page(self, path, *, stream=False):
+        if "/v1" not in self.versions:
+            return PAGE
+        v1 = path == "/v1"
+        page = PAGE if v1 else PAGE.replace("Functional 1", "Functional 2")
+        v1_current = ' aria-current="page"' if v1 else ""
+        v2_current = "" if v1 else ' aria-current="page"'
+        page = page.replace("<!-- versions -->", f'<nav aria-label="Game version">'
+                            f'<a href="/"{v2_current}>V2</a> '
+                            f'<a href="/v1"{v1_current}>V1</a></nav>')
+        return page.replace("const streaming=false", "const streaming=true") if stream and not v1 else page
+
+    def game(self, prefix, headers):
+        template, name = self.versions[prefix]
+        now = time.monotonic()
+        for key, (seen, game) in tuple(self.games.items()):
+            if now - seen > 300 and game not in self.active:
+                del self.games[key]
+        token = SimpleCookie(headers.get("Cookie", "")).get(name)
+        key = (name, token.value) if token else None
+        if key in self.games:
+            _, game = self.games.pop(key)
+            self.games[key] = now, game
+            return game, None
+        if len(self.games) >= 32:
+            for key, (_, game) in self.games.items():
+                if game not in self.active:
+                    del self.games[key]
+                    break
+            else:
+                raise OverflowError("too many games")
+        token = token_urlsafe(24)
+        game = copy(template)
+        self.games[name, token] = now, game
+        cookie = f"{name}={token}; Path={prefix or '/'}; HttpOnly; SameSite=Strict"
+        if headers.get("X-Forwarded-Proto") == "https":
+            cookie += "; Secure"
+        return game, cookie
+
+
 def handler_for(session, *, public=False, comparison=None):
-    games = OrderedDict()
-    versions = {"": (session, "tetris_v2" if comparison is not None else "functional1")}
-    if comparison is not None:
-        versions["/v1"] = comparison, "tetris_v1"
+    site = GameSite(session, comparison)
+    versions = site.versions
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -97,17 +143,7 @@ def handler_for(session, *, public=False, comparison=None):
             path = self.path.split("?", 1)[0].rstrip("/")
             if path != "/health" and path not in versions:
                 self.send_error(404); return
-            page = PAGE
-            if comparison is not None:
-                v1 = path == "/v1"
-                if not v1:
-                    page = page.replace("Functional 1", "Functional 2")
-                v1_current = ' aria-current="page"' if v1 else ""
-                v2_current = "" if v1 else ' aria-current="page"'
-                page = page.replace("<!-- versions -->", f'<nav aria-label="Game version">'
-                                    f'<a href="/"{v2_current}>V2</a> '
-                                    f'<a href="/v1"{v1_current}>V1</a></nav>')
-            body = b"ok\n" if path == "/health" else page.encode()
+            body = b"ok\n" if path == "/health" else site.page(path).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -147,27 +183,11 @@ def handler_for(session, *, public=False, comparison=None):
                 self.send_error(400, "invalid command")
 
         def game(self, prefix):
-            template, name = versions[prefix]
             if not public:
-                return template, None
-            now = time.monotonic()
-            while games and now - next(iter(games.values()))[0] > 300:
-                games.popitem(last=False)
-            token = SimpleCookie(self.headers.get("Cookie", "")).get(name)
-            key = (name, token.value) if token else None
-            if key in games:
-                _, game = games.pop(key)
-                games[key] = now, game
-                return game, None
-            if len(games) >= 32:
-                games.popitem(last=False)
-            token = token_urlsafe(24)
-            game = copy(template)
-            game.reset()
-            games[name, token] = now, game
-            cookie = f"{name}={token}; Path={prefix or '/'}; HttpOnly; SameSite=Strict"
-            if self.headers.get("X-Forwarded-Proto") == "https":
-                cookie += "; Secure"
+                return versions[prefix][0], None
+            game, cookie = site.game(prefix, self.headers)
+            if cookie:
+                game.reset()
             return game, cookie
     return Handler
 
@@ -191,6 +211,10 @@ def main():
 
         session = FunctionalTwoSession(args.functional_2)
     comparison = NeuralSession(args.weights, args.seed) if args.compare else None
+    if args.compare:
+        from live import serve
+        serve(GameSite(session, comparison), args.host, args.port)
+        return
     server = HTTPServer((args.host, args.port), handler_for(session, public=True, comparison=comparison))
     print(f"http://{args.host}:{args.port} — Ctrl-C to close", flush=True)
     try:

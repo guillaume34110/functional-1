@@ -1,7 +1,7 @@
 import os
 
 from playwright.sync_api import expect, sync_playwright
-from functional_two_browser import check
+from functional_two_browser import capture_stream, check
 
 
 with sync_playwright() as playwright:
@@ -31,7 +31,8 @@ with sync_playwright() as playwright:
         page.keyboard.press("z")
     assert pulse.value.ok
     assert len(pulse.value.json()["frame"]) == 7680
+    frames = capture_stream(page)
     page.get_by_role("link", name="V2", exact=True).click()
     expect(page).to_have_url(url + "/")
-    check(page)
+    check(page, frames)
     browser.close()
