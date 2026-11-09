@@ -11,10 +11,32 @@ from play import handler_for, HTTPServer, NeuralSession, RELEASE
 from functional_two import FunctionalTwoSession
 from model import ACTIONS
 from object_annotations import classify_board
+from run import ROOT
 from token_model import decode_tokens
+from train_native_render import SCHEDULES, capture
 
 
 class PublicPlayTest(unittest.TestCase):
+    def test_zigzag_keeps_its_rotation_phase_at_both_walls(self):
+        torch.set_num_threads(1)
+        model = FunctionalTwoSession(RELEASE.with_name("functional-2")).model
+        rom = ROOT / "roms/adjustris-v1.1.gb"
+        turns = range(33, 70, 4)
+        with torch.inference_mode():
+            for wall in ("left_wall", "right_wall"):
+                buttons = SCHEDULES[wall]
+                frames = capture(rom, 4001, buttons)[:, 1::2, 1::2]
+                start = next(t for t, frame in enumerate(frames) if (classify_board(frame) >= 0).sum() == 4)
+                state = None
+                for t in range(start, turns[-1] + 1):
+                    frame = torch.from_numpy(frames[t:t+1, None].copy())
+                    action = torch.tensor([ACTIONS.index(buttons[t])])
+                    if t in turns:
+                        with self.subTest(wall=wall, step=t):
+                            actual, _ = model.predict_frame(frame, action, state)
+                            np.testing.assert_array_equal(actual[0, 0, :, 8:48], frames[t+1, :, 8:48])
+                    state = model.advance_observed_frame(frame, action, state)
+
     def test_bar_rotation_respects_both_walls(self):
         torch.set_num_threads(1)
         game = FunctionalTwoSession(RELEASE.with_name("functional-2"))
