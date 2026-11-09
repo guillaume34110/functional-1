@@ -402,7 +402,8 @@ class SpawnPreviewSceneDynamics(LearnedOverlapSceneDynamics):
 
     def _preview_features(self, tokens):
         preview = self.embedding(tokens[:, :6, 13:19]).permute(0, 3, 1, 2)
-        return F.adaptive_avg_pool2d(preview, (2, 2)).flatten(1)
+        pooled = F.adaptive_avg_pool2d(preview, (2, 2))
+        return pooled.reshape(pooled.size(0), pooled.size(1) * 4)
 
     def _preview_shape_scores(self, tokens):
         return self.spawn_preview_head(self._preview_features(tokens))
@@ -799,7 +800,7 @@ class TimedEventSceneDynamics(JointEventSceneDynamics):
         down = (current + 10).clamp_max(scores.size(2) - 1)
         state = details["state"]
         eligible = (actions == ACTIONS.index("down")) & (state[:, 18, 0, 0] > 1) & details["contact_visible"]
-        eligible &= (current // 180 == down // 180) & (current != down) & self.valid_poses.flatten()[down]
+        eligible = eligible & ((current // 180 == down // 180) & (current != down) & self.valid_poses.flatten()[down])
         rows = eligible.nonzero().flatten()
         candidates = torch.stack((current[rows], down[rows]), dim=1)
         pair = scores[rows[:, None], 0, candidates]
@@ -809,9 +810,9 @@ class TimedEventSceneDynamics(JointEventSceneDynamics):
         float_probability = (-details["contact_logit"][rows]).sigmoid()
         odds = torch.lerp(pair[:, 1] - pair[:, 0], logits, float_probability)
         adjusted = F.pad(odds[:, None], (1, 0)).log_softmax(1) + pair.logsumexp(1, keepdim=True)
-        result = scores.clone()
-        result[rows[:, None], 0, candidates] = adjusted
-        return result
+        copy = scores[:, 0]
+        refined = copy[rows].scatter(1, candidates, adjusted)
+        return torch.cat((copy.index_copy(0, rows, refined)[:, None], scores[:, 1:]), dim=1)
 
 
 class CanvasOverlapSceneDynamics(TimedEventSceneDynamics):
@@ -1176,6 +1177,13 @@ class ClearRoutingSceneDynamics(ReplayEventSceneDynamics):
         return scores + correction[:, :3, None]
 
 
+def update_carried_pose(state, active, pose, channel):
+    flat = state.flatten(1)
+    offset = (state.size(1) + channel) * state.size(2) * state.size(3)
+    updated = flat[:, offset].index_copy(0, active, pose.to(state))
+    return torch.cat((flat[:, :offset], updated[:, None], flat[:, offset + 1:]), dim=1).reshape_as(state)
+
+
 class ClearAnimationSceneDynamics(ClearRoutingSceneDynamics):
     """Learn a visible row sequence with a latched source and an elapsed phase."""
 
@@ -1229,7 +1237,9 @@ class ClearAnimationSceneDynamics(ClearRoutingSceneDynamics):
         return torch.cat((nearby, blank, flash), dim=2)
 
     def animation_row_scores(self, phase, density):
-        nearby = F.pad(density, (4, 4)).unfold(1, 9, 1)
+        rows = torch.arange(density.size(1), device=density.device)[:, None]
+        offsets = torch.arange(9, device=density.device)
+        nearby = F.pad(density, (4, 4))[:, rows + offsets]
         peaks = density.pow(16)
         prefix = peaks.cumsum(1)
         suffix = peaks.sum(1, keepdim=True) - prefix + peaks
@@ -1267,10 +1277,11 @@ class ClearAnimationSceneDynamics(ClearRoutingSceneDynamics):
         details = super().scene_details(tokens, actions, state)
         age = torch.zeros_like(actions) if memory is None else memory[:, 0, 0].long()
         onset = self.animation_start_logit(tokens, details)
-        active = ((age > 0) | (onset > 0)).nonzero().flatten()
+        active_mask = (age > 0) | (onset > 0)
+        active = active_mask.nonzero().flatten()
         next_memory = torch.zeros_like(details["state"][:, -1:])
         details["animation_memory"] = next_memory
-        if not len(active):
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return details
         source = tokens[active] if memory is None else torch.where(
             age[active, None, None] > 0, memory[active].long(), tokens[active])
@@ -1284,8 +1295,8 @@ class ClearAnimationSceneDynamics(ClearRoutingSceneDynamics):
         scores = self.animation_row_scores(phase, density)
         details["animation"] = {"active": active, "ending": ending, "rows": rows, "scores": scores,
                                 "pose": torch.where(visible, joint.flatten(1).argmax(1), -1)}
-        details["mode"] = details["mode"].clone()
-        details["mode"][active] = details["mode"].new_tensor([-1., -1., 1.])
+        mode = details["mode"]
+        details["mode"] = torch.where(active_mask[:, None], mode.new_tensor([-1., -1., 1.]), mode)
         details["next"]["joint"] = details["next"]["joint"].index_copy(0, active, joint)
         visibility = (visible[:, None].to(joint) * 2 - 1) * 20
         details["next"]["visible"] = details["next"]["visible"].index_copy(0, active, visibility)
@@ -1329,7 +1340,7 @@ class ClearAnimationSceneDynamics(ClearRoutingSceneDynamics):
         state = super().rendered_state(details, prediction)
         animation = details.get("animation")
         if animation is not None:
-            state[animation["active"], -1, 0, 0] = animation["pose"].to(state)
+            state = update_carried_pose(state, animation["active"], animation["pose"], -1)
         return torch.cat((state, details["animation_memory"]), dim=1)
 
     def forward(self, tokens, actions, state=None):
@@ -1346,15 +1357,15 @@ class ClearDurationSceneDynamics(ClearAnimationSceneDynamics):
         self.register_buffer("_clear_duration_scene", torch.tensor(True))
 
     def clear_duration(self, phase):
-        neutral = torch.zeros(len(phase), dtype=torch.long, device=phase.device)
+        neutral = torch.zeros_like(phase[:, 0], dtype=torch.long)
         # The timing head sees the locked board with a fixed age and button.
-        source = torch.cat((self.animation_time(neutral), phase[:, 8:12], phase.new_zeros(len(phase), 1),
+        source = torch.cat((self.animation_time(neutral), phase[:, 8:12], torch.zeros_like(phase[:, 12:13]),
                             self.action_embedding(neutral)), dim=1)
         return self.animation_end(source)[:, 0].sigmoid() * (self.phase_limit - 1)
 
     def animation_output_phase(self, phase, ending):
-        terminal = torch.full((len(phase),), self.phase_limit - 1, dtype=torch.long, device=phase.device)
-        features = torch.cat((self.animation_time(terminal), phase[:, 8:12], phase.new_ones(len(phase), 1),
+        terminal = torch.full_like(phase[:, 0], self.phase_limit - 1, dtype=torch.long)
+        features = torch.cat((self.animation_time(terminal), phase[:, 8:12], torch.ones_like(phase[:, 12:13]),
                               phase[:, 13:]), dim=1)
         return torch.where(ending[:, None], features, phase)
 
@@ -1408,7 +1419,7 @@ class TerminalSceneDynamics(ClearDurationSceneDynamics):
         time = torch.stack((age.float() / 40, (age - duration) / 40), dim=1)
         features = torch.cat((profile, time), dim=1)
         row = torch.arange(18, device=board.device, dtype=features.dtype) / 17
-        row = row[None, :, None].expand(len(board), -1, -1)
+        row = row[None, :, None].expand(board.size(0), -1, -1)
         wipe = self.terminal_wipe(torch.cat((features[:, None].expand(-1, 18, -1), row), dim=2))[:, :, 0]
         return wipe, duration
 
@@ -1432,8 +1443,9 @@ class TerminalSceneDynamics(ClearDurationSceneDynamics):
         animation = details.get("animation")
         if animation is not None:
             onset[animation["active"]] = False
-        active = ((age > 0) | onset).nonzero().flatten()
-        if not len(active):
+        active_mask = (age > 0) | onset
+        active = active_mask.nonzero().flatten()
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return details
         source = tokens[active] if memory is None else torch.where(
             age[active, None, None] > 0, memory[active].long(), tokens[active])
@@ -1444,8 +1456,8 @@ class TerminalSceneDynamics(ClearDurationSceneDynamics):
                                "menu": menu, "chosen": self.terminal_panels[menu.argmax(1)].long()}
         details["next"]["visible"] = details["next"]["visible"].clone()
         details["next"]["visible"][active] = -20
-        details["mode"] = details["mode"].clone()
-        details["mode"][active] = details["mode"].new_tensor([-1., -1., 1.])
+        mode = details["mode"]
+        details["mode"] = torch.where(active_mask[:, None], mode.new_tensor([-1., -1., 1.]), mode)
         details["animation_memory"][active, 0] = source.to(details["animation_memory"])
         details["animation_memory"][active, 0, 0, 0] = -(age[active] + 1).clamp_max(self.phase_limit).float()
         return details
@@ -1487,7 +1499,8 @@ class TerminalSceneDynamics(ClearDurationSceneDynamics):
         state = super().rendered_state(details, prediction)
         terminal = details.get("terminal")
         if terminal is not None:
-            state[terminal["active"], -2, 0, 0] = -1
+            active = terminal["active"]
+            state = update_carried_pose(state, active, torch.full_like(active, -1), -2)
         return state
 
 
@@ -1664,7 +1677,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         return ~neighbors.bool().any(1) & (col > 0) & (right < 9)
 
     def adjust_proposal(self, gate, absolute, relative, current, actions, neighbors):
-        if self._a_proposal_gate is None or actions is None or not (actions == ACTIONS.index("a")).any():
+        if self._a_proposal_gate is None or actions is None or (not torch.onnx.is_in_onnx_export() and not (actions == ACTIONS.index("a")).any()):
             return gate, relative
         kind = current // 180
         target = self.a_rotation_target[kind]
@@ -1706,7 +1719,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         left, right, down = (ACTIONS.index(name) for name in ("left", "right", "down"))
         active = (known & (actions == down) & ((previous == left) | (previous == right))).nonzero().flatten()
         proved = torch.zeros_like(known)
-        if not len(active):
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return proved
         pose = details["current"]["joint"][active].flatten(1).argmax(1)
         kind, position = pose // 180, pose % 180
@@ -1793,7 +1806,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         digits = self.counter.read(frame)
         unavailable = ~(digits >= 0).all(1) | (digits[:, [4, 9, 11]] == 10).any(1)
         if state is not None and state.size(1) > self.state_channels:
-            unavailable |= state[:, self.state_channels, 0, 0] != 0
+            unavailable = unavailable | (state[:, self.state_channels, 0, 0] != 0)
         return torch.where(paused, 1, 2 * unavailable.long())
 
     def _pixel_step(self, frame, action, state, observed):
@@ -1863,7 +1876,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             source = animation["rows"][ending, :, 4]
             occupied = torch.isin(result[active], self.object_tiles)
             compacted = (occupied | (result[active] == self.blank_id)).flatten(1).all(1)
-            compacted &= occupied.sum((1, 2)) < torch.isin(source, self.object_tiles).sum((1, 2))
+            compacted = compacted & (occupied.sum((1, 2)) < torch.isin(source, self.object_tiles).sum((1, 2)))
             learned = self.counter.events(row_strength(source, self.object_tiles)).argmax(1) + 2
             code[active] = learned.masked_fill(~compacted, 0)
         if (terminal := details.get("terminal")) is not None:
@@ -1897,7 +1910,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                 replay = (displayed >= 0).all(1) & (digits == displayed).all(1)
                 legacy = torch.where(replay[:, None], cached, legacy)
             state = state[:, :-1]
-        tokens[:, rows, cols] = legacy
+        positions = (rows * tokens.size(2) + cols).expand(tokens.size(0), -1)
+        tokens = tokens.flatten(1).scatter(1, positions, legacy).reshape_as(tokens)
         details = self.scene_details(tokens, action, state)
         if opening is not None or first_turn is not None:
             board = tokens[:, :, 2:12]
@@ -1905,7 +1919,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         if opening is not None:
             opening = opening.masked_fill(~first_piece, -1)
         if first_turn is not None:
-            first_turn &= first_piece
+            first_turn = first_turn & (first_piece)
         clock = opening
         if continued is not None:
             lateral = (action == ACTIONS.index("left")) | (action == ACTIONS.index("right"))
@@ -1943,7 +1957,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             updated = self.counter(updated, torch.cat((previous, features), dim=1))
         rendered = self.counter.paint(decode_tokens(prediction, self.codebook), updated, use)
         # Retain the frozen renderer's inputs when the readout repaints its own feedback.
-        displayed = updated.masked_fill(~(use & (not observed))[:, None], -1)
+        displayed = updated.masked_fill((torch.ones_like(use) if observed else ~use)[:, None], -1)
         memory = torch.cat((features, prediction[:, rows, cols], displayed), dim=1)
         memory = F.pad(memory, (0, 18 * 20 - memory.size(1))).reshape(len(frame), 1, 18, 20)
         if opening is not None:
@@ -1963,7 +1977,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         board = tokens[:, :, 2:12].flatten(1)
         isolated = (board == self.blank_id).sum(1) == 176
         active = isolated.nonzero().flatten()
-        if not len(active):
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return current, pool
         cells = self.overlap_cells.flatten(0, 1)
         colors = self.object_tiles[self.event_poses // 180]
@@ -1971,16 +1985,17 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         unique = exact.sum(1) == 1
         active = active[unique]
         joint = current["joint"].flatten(1)
-        joint[active] = torch.where(exact[unique], 0.0, -torch.inf).to(joint)
-        current["joint"] = joint.reshape_as(current["joint"])
-        current["visible"][active] = 20
+        chosen = torch.where(exact[unique], 0.0, -torch.inf).to(joint)
+        current["joint"] = joint.index_copy(0, active, chosen).reshape_as(current["joint"])
+        visible = current["visible"]
+        current["visible"] = visible.index_copy(0, active, torch.full_like(visible[active], 20))
         return current, pool
 
     def blocked_direction(self, tokens, action, details):
         left, right = ACTIONS.index("left"), ACTIONS.index("right")
         active = ((action == left) | (action == right)).nonzero().flatten()
         blocked = torch.zeros_like(action, dtype=torch.bool)
-        if not len(active):
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return blocked
         pose = details["current"]["joint"][active].flatten(1).argmax(1)
         shape, position = pose // 180, pose % 180
@@ -2000,12 +2015,12 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         held = details["state"][:, 18, 0, 0]
         idle = held > 1
         if opening is not None:
-            idle |= (opening >= 0) & (self.gravity_transition[opening % self.opening_period] > 0)
+            idle = idle | ((opening >= 0) & (self.gravity_transition[opening % self.opening_period] > 0))
         quiet = action == ACTIONS.index("noop")
         if self.held_wall_gravity is not None:
-            quiet |= self.blocked_direction(tokens, action, details)
+            quiet = quiet | (self.blocked_direction(tokens, action, details))
         active = (known & ordinary & quiet & idle).nonzero().flatten()
-        if not len(active):
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return
         current = details["current"]["joint"][active].flatten(1).argmax(1)
         masks = self.shape_masks.flatten(0, 1)
@@ -2040,7 +2055,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         left, right = ACTIONS.index("left"), ACTIONS.index("right")
         lateral = (action == left) | (action == right)
         age = opening if continued is None else torch.where(continued >= 0, continued, opening)
-        if not (lateral & (age >= 0)).any():
+        if not torch.onnx.is_in_onnx_export() and not (lateral & (age >= 0)).any():
             return
         known, _, _ = self.continuity_signals(tokens, details)
         active = (known & lateral & (age >= 0)).nonzero().flatten()
@@ -2059,12 +2074,12 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         masks = self.shape_masks.flatten(0, 1).bool()
         background = tokens[active, :, 2:12].masked_fill(masks[current], self.blank_id)
         shifted = kind * 180 + y * 10 + requested.clamp(0, 9)
-        free &= (~masks[shifted] | (background == self.blank_id)).flatten(1).all(1)
+        free = free & ((~masks[shifted] | (background == self.blank_id)).flatten(1).all(1))
         x = torch.where((shift == 1) & free, requested, x)
         due = self.gravity_transition[age[active] % self.opening_period] > 0
         drop = kind * 180 + (y + 1).clamp_max(17) * 10 + x
         can_drop = (y < 17) & self.valid_poses.flatten()[drop]
-        can_drop &= (~masks[drop] | (background == self.blank_id)).flatten(1).all(1)
+        can_drop = can_drop & ((~masks[drop] | (background == self.blank_id)).flatten(1).all(1))
         pose = kind * 180 + (y + (due & can_drop).long()) * 10 + x
         use = (~free | (shift >= 0)) & (~due | can_drop)
         self.select_rendered_pose(details, active[use], pose[use], torch.zeros_like(pose[use]))
@@ -2072,12 +2087,12 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
     def apply_wall_rotation(self, tokens, action, details, first_turn=None):
         a, b = ACTIONS.index("a"), ACTIONS.index("b")
         rotating = (action == a) | (action == b)
-        if not rotating.any():
+        if not torch.onnx.is_in_onnx_export() and not rotating.any():
             return
         known, _, _ = self.continuity_signals(tokens, details)
         free = ~details["contact_neighbors"].bool().any(1)
         active = (known & free & rotating).nonzero().flatten()
-        if not len(active):
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return
         current = details["current"]["joint"][active].flatten(1).argmax(1)
         kind, position = current // 180, current % 180
@@ -2100,12 +2115,16 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         self.select_rendered_pose(details, active[use], candidate[use], torch.zeros_like(candidate[use]))
 
     def select_rendered_pose(self, details, active, pose, mode):
-        joint = details["next"]["joint"][active].flatten(1)
-        joint = torch.full_like(joint, -torch.inf).scatter(1, pose[:, None], 0)
-        details["next"]["joint"][active] = joint.reshape_as(details["next"]["joint"][active])
-        details["next"]["visible"][active] = 20
-        details["mode"][active] = F.one_hot(mode, 3).to(details["mode"])
-        details["state"][active, -1, 0, 0] = pose.to(details["state"])
+        next_piece = details["next"]
+        joint = next_piece["joint"]
+        chosen = torch.full_like(joint[active].flatten(1), -torch.inf).scatter(1, pose[:, None], 0)
+        chosen = chosen.reshape(active.size(0), joint.size(1), joint.size(2))
+        next_piece["joint"] = joint.index_copy(0, active, chosen)
+        visible = next_piece["visible"]
+        next_piece["visible"] = visible.index_copy(0, active, torch.full_like(visible[active], 20))
+        scores = details["mode"]
+        details["mode"] = scores.index_copy(0, active, F.one_hot(mode, 3).to(scores))
+        details["state"] = update_carried_pose(details["state"], active, pose, -1)
 
     def keep_visible_stack(self, tokens, details):
         known, _, _ = self.continuity_signals(tokens, details)
@@ -2116,7 +2135,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         support = details["contact_neighbors"][:, 7] > 0
         reject = ((mode == 2) & ~filled.all(2).any(1)) | ((mode == 1) & ~support)
         active = (known & ordinary & reject).nonzero().flatten()
-        if not len(active):
+        if not torch.onnx.is_in_onnx_export() and not len(active):
             return
         current = details["current"]["joint"][active].flatten(1).argmax(1)
         masks = self.shape_masks.flatten(0, 1).bool()
@@ -2132,7 +2151,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
         same_style = self.object_tiles[current // 180, None] == self.object_tiles[candidates // 180]
         local = (dy >= -2) & (dy <= 3) & (dx.abs() <= 2) & same_style
         legal = torch.stack((copy_clear & local, deposit_clear & support[active, None]), dim=1)
-        legal &= self.valid_poses.flatten()
+        legal = legal & (self.valid_poses.flatten())
         scores = details["event_scores"][active, :2].masked_fill(~legal, -torch.inf)
         chosen = scores.flatten(1).argmax(1)
         usable = torch.isfinite(scores.flatten(1).amax(1))

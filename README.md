@@ -19,7 +19,7 @@ Open [the local game](http://127.0.0.1:8765/). Use the arrow keys to move and so
 
 ## Container deployment
 
-Build the root Dockerfile and route traffic to port 8765. The health endpoint is `/health`. The container verifies both release manifests and serves V2 at `/` and V1 at `/v1` with bounded, in-memory visitor sessions. A restart clears active games.
+Build the root Dockerfile and route traffic to port 8765. The health endpoint is `/health`. The build verifies both release manifests and exports their models. The container serves the browser runtime and weights as static files, with V2 at `/` and V1 at `/v1`. Once a version is loaded, the browser keeps its game state and runs inference locally.
 
 ```sh
 docker build -t functional-1 .
@@ -34,7 +34,7 @@ docker run --rm -p 8765:8765 functional-1
 4. Replay native screenshots to recover small HUD digits that the reduced raster aliases. Learn when a rendered deposit or completed line clear updates the counter, then carry the digits through a learned decimal readout.
 5. Preserve the V84 gameplay tensors and fit 24 pause transition coefficients on nine training sequences for V85. Keep the previous screen and recurrent state while paused. Compare the pause panel and the first resumed frame to the reference on five separate validation games.
 
-The ROM supplies training observations. The interactive server loads the release and feeds its own generated screens back into the model. Each browser gets its own recurrent state.
+The ROM supplies training observations. In the hosted game, the browser feeds each generated screen and its recurrent state into the next model step.
 
 ## What worked
 

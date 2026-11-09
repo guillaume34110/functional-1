@@ -83,6 +83,19 @@ class NeuralSession:
         return self.result((time.perf_counter() - started) * 1000)
 
 
+def version_page(path, *, stream=False, browser=False):
+    v1 = path == "/v1"
+    page = PAGE if v1 else PAGE.replace("Functional 1", "Functional 2")
+    v1_current = ' aria-current="page"' if v1 else ""
+    v2_current = "" if v1 else ' aria-current="page"'
+    page = page.replace("<!-- versions -->", f'<nav aria-label="Game version">'
+                        f'<a href="/"{v2_current}>V2</a> '
+                        f'<a href="/v1"{v1_current}>V1</a></nav>')
+    if browser:
+        return page.replace("const browserLocal=false", "const browserLocal=true")
+    return page.replace("const streaming=false", "const streaming=true") if stream and not v1 else page
+
+
 class GameSite:
     def __init__(self, session, comparison):
         self.games = OrderedDict()
@@ -94,14 +107,7 @@ class GameSite:
     def page(self, path, *, stream=False):
         if "/v1" not in self.versions:
             return PAGE
-        v1 = path == "/v1"
-        page = PAGE if v1 else PAGE.replace("Functional 1", "Functional 2")
-        v1_current = ' aria-current="page"' if v1 else ""
-        v2_current = "" if v1 else ' aria-current="page"'
-        page = page.replace("<!-- versions -->", f'<nav aria-label="Game version">'
-                            f'<a href="/"{v2_current}>V2</a> '
-                            f'<a href="/v1"{v1_current}>V1</a></nav>')
-        return page.replace("const streaming=false", "const streaming=true") if stream and not v1 else page
+        return version_page(path, stream=stream)
 
     def game(self, prefix, headers):
         template, name = self.versions[prefix]
