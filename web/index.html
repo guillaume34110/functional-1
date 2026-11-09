@@ -9,6 +9,9 @@
 body{margin:0;color:#e9e2fa;font:16px/1.55 ui-monospace,monospace;background-color:#101020;background-image:repeating-linear-gradient(0deg,transparent 0 31px,#1c1c33 31px 32px),repeating-linear-gradient(90deg,#101020 0 31px,#1c1c33 31px 32px)}
 header{display:flex;align-items:center;gap:1rem;border-bottom:1px solid var(--line);padding:1rem max(1.5rem,calc((100vw - 1200px)/2));background:var(--ink);font-size:.8rem;text-transform:uppercase;letter-spacing:.12em}
 header strong{background:var(--signal);color:var(--ink);padding:.35rem .65rem;white-space:nowrap}
+header nav{margin-left:auto;display:flex;gap:.75rem}
+header nav a{color:#e9e2fa}
+header nav a[aria-current="page"]{color:#f2fb4b;font-weight:bold}
 main{display:grid;grid-template-columns:minmax(12rem,.75fr) minmax(0,1.4fr) minmax(13rem,.7fr);gap:clamp(1rem,3vw,2.5rem);align-items:start;max-width:1248px;margin:0 auto;padding:clamp(1.5rem,5vw,4rem) 1.5rem}
 h1{font-size:clamp(2.3rem,4.8vw,4.5rem);letter-spacing:-.085em;line-height:.94;margin:.45em 0 .35em}
 h2{font-size:.84rem;letter-spacing:.1em;text-transform:uppercase;color:#f2fb4b;background-color:#111121;margin:0 0 .8rem}
@@ -31,7 +34,7 @@ dl{margin:0}dt,dd{margin:.55rem 0;display:inline-block}dt{width:46%;color:#d3c9e
 @media(max-width:900px){main{grid-template-columns:minmax(0,1.4fr) minmax(12rem,.7fr)}.intro{grid-column:1/-1}}
 @media(max-width:600px){main{grid-template-columns:minmax(0,1fr)}.intro{grid-column:auto}}
 </style>
-<header><strong>Functional 1</strong><span>Neural game engine</span></header>
+<header><strong>Functional 1</strong><span>Neural game engine</span><!-- versions --></header>
 <main>
 <section class="intro">
 <p class="eyebrow">Playable research prototype</p>
@@ -64,13 +67,13 @@ dl{margin:0}dt,dd{margin:.55rem 0;display:inline-block}dt{width:46%;color:#d3c9e
 </section>
 <section class="card">
 <h2>Model</h2>
-<dl><dt>Release</dt><dd>Functional 1</dd><dt>Checkpoint</dt><dd>330 kB</dd><dt>Input rate</dt><dd>15 Hz</dd></dl>
+<dl><dt>Release</dt><dd id="release">Functional 1</dd><dt>Checkpoint</dt><dd>330 kB</dd><dt>Input rate</dt><dd>15 Hz</dd></dl>
 </section>
 </aside>
 </main>
 <script>
 const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d'),status=document.querySelector('#status');
-let held=[],pulses=[],busy=false,paused=false,resetRequested=false;
+let held=[],pulses=[],busy=false,paused=false,resetRequested=false,menu=false;
 const buttons={ArrowLeft:'left',ArrowRight:'right',ArrowDown:'down',ArrowUp:'up',z:'a',x:'b',Enter:'start'};
 const discrete=new Set(['a','b','start']);
 window.addEventListener('keydown',e=>{
@@ -86,14 +89,21 @@ for(const key of document.querySelectorAll('[data-action]')){
  key.onlostpointercapture=()=>{held=held.filter(x=>x!==action)};
 }
 window.addEventListener('blur',()=>{held=[];pulses=[];paused=true;document.querySelector('#pause').textContent="Resume"});
-function draw(data){let raw=atob(data.frame),image=ctx.createImageData(80,72);for(let i=0;i<raw.length;i++){
+function draw(data){
+ const width=data.width??80,height=data.height??72;
+ if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height}
+ let raw=atob(data.frame),image=ctx.createImageData(width,height);for(let i=0;i<raw.length;i++){
  const shade=[[20,42,37,255],[62,103,79,255],[134,182,125,255],[197,231,161,255]][raw.charCodeAt(i)];image.data.set(shade,i*4)}ctx.putImageData(image,0,0);
- status.textContent=`${data.steps} neural steps · ${data.inference_ms.toFixed(1)} ms / step`;}
-async function request(path,body){let response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(data.release&&document.querySelector('#release').textContent!==data.release){
+  document.title=data.release+' · Neural Tetris';document.querySelector('header strong').textContent=data.release;document.querySelector('#release').textContent=data.release
+ }
+ menu=data.menu===true;
+ status.textContent=menu?'Press Z or Enter to play':`${data.steps} neural steps · ${data.inference_ms.toFixed(1)} ms / step`;}
+async function request(path,body){let response=await fetch(location.pathname.replace(/\/+$/,'')+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw Error(await response.text());return response.json()}
 document.querySelector('#pause').onclick=e=>{paused=!paused;e.target.textContent=paused?"Resume":"Pause"};
 document.querySelector('#reset').onclick=()=>{held=[];pulses=[];resetRequested=true};
-setInterval(async()=>{if(busy||(paused&&!resetRequested))return;
+setInterval(async()=>{if(busy||(!resetRequested&&(paused||(menu&&!pulses.length&&!held.length))))return;
  const reset=resetRequested;resetRequested=false;busy=true;
  try{draw(reset?await request('/reset',{}):await request('/step',{action:pulses.shift()??held.at(-1)??'noop'}))}
  catch(e){paused=true;status.textContent=e.message}finally{busy=false}},1000/15);

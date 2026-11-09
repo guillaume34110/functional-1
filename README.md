@@ -1,5 +1,7 @@
 # Functional 1
 
+The [Functional 2 release](docs/functional-2-baseline.md#functional-2-release) adds a native 160×144 display, the title and pause menus, and automatic gravity. The hosted application opens [V2](https://tetris.progsoft.eu/) by default. Select [V1](https://tetris.progsoft.eu/v1) to compare with the original release. Each version keeps its own game state.
+
 Functional 1 is a small action-conditioned game model. You choose the buttons and the model produces the next screen from the current image and recurrent memory. The released checkpoint is the 329,982-byte V85 model from the verified human playthrough.
 
 ## Play locally
@@ -17,7 +19,7 @@ Open [the local game](http://127.0.0.1:8765/). Use the arrow keys to move and so
 
 ## Container deployment
 
-Build the root Dockerfile and route traffic to port 8765. The health endpoint is `/health`. The container verifies the release hashes at build time and serves the game from a single process with bounded, in-memory visitor sessions. A restart clears active games.
+Build the root Dockerfile and route traffic to port 8765. The health endpoint is `/health`. The container verifies both release manifests and serves V2 at `/` and V1 at `/v1` with bounded, in-memory visitor sessions. A restart clears active games.
 
 ```sh
 docker build -t functional-1 .

@@ -1,12 +1,19 @@
 import os
 
 from playwright.sync_api import expect, sync_playwright
+from functional_two_browser import check
 
 
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(channel=os.environ.get("BROWSER_CHANNEL"))
     page = browser.new_page()
-    page.goto(os.environ.get("GAME_URL", "http://127.0.0.1:8765/"))
+    url = os.environ.get("GAME_URL", "http://127.0.0.1:8765/").rstrip("/")
+    page.goto(url)
+    expect(page.get_by_role("link", name="V2", exact=True)).to_have_attribute("aria-current", "page")
+    page.get_by_role("link", name="V1", exact=True).click()
+    expect(page).to_have_url(url + "/v1")
+    expect(page.locator("#release")).to_have_text("Functional 1")
+    expect(page.get_by_role("link", name="V1", exact=True)).to_have_attribute("aria-current", "page")
     expect(page.locator("#status")).to_contain_text("neural steps")
     held_steps = []
     with page.expect_request("**/step"):
@@ -24,4 +31,7 @@ with sync_playwright() as playwright:
         page.keyboard.press("z")
     assert pulse.value.ok
     assert len(pulse.value.json()["frame"]) == 7680
+    page.get_by_role("link", name="V2", exact=True).click()
+    expect(page).to_have_url(url + "/")
+    check(page)
     browser.close()
