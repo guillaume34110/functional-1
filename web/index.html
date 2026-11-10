@@ -84,8 +84,8 @@ const worker=browserLocal?new Worker('/local-game.mjs?version='+(colorVersion?'v
 const creditsButton=document.querySelector('#credits');
 const liveInput=streaming||browserLocal;
 const socket=streaming?new WebSocket(new URL('/stream',location.href).href.replace(/^http/,'ws')):null;
-function send(pulse,reset){
- const input={held:held.at(-1)??'noop',paused,pulse,reset};
+function send(pulse,reset,softDrop=false){
+ const input={held:held.at(-1)??'noop',paused,pulse,reset,softDrop};
  if(worker)worker.postMessage(input);
  else if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(input));
 }
@@ -97,17 +97,36 @@ function press(action){
  const selectLevel=levelMenu&&['left','right','up','down'].includes(action);
  if(selectLevel||(menu&&(action==='a'||action==='start')))setPaused(false);
  if(selectLevel||discrete.has(action)){if(liveInput)send(action);else pulses.push(action)}
- else if(!held.includes(action)){held.push(action);send(action)}
+ else if(!held.includes(action)){
+  held.push(action);
+  const softDrop=colorVersion&&action==='down';
+  send(action,undefined,softDrop)
+ }
 }
 function release(action){held=held.filter(x=>x!==action);send()}
 window.addEventListener('keydown',e=>{
  if(e.key==='Enter'&&e.target.closest?.('button, a'))return;
- const action=buttons[e.key];if(!action)return;e.preventDefault();
+ if(colorVersion&&(e.ctrlKey||e.metaKey||e.altKey))return;
+ const action=buttons[colorVersion&&e.key.length===1?e.key.toLowerCase():e.key];if(!action)return;e.preventDefault();
  if(!e.repeat)press(action);
 });
 window.addEventListener('keyup',e=>{const action=buttons[e.key];if(action){e.preventDefault();release(action)}});
 for(const key of document.querySelectorAll('[data-action]')){
  const action=key.dataset.action;
+ if(colorVersion){
+  key.onpointerdown=e=>{
+   if(e.button!==0)return;
+   if(!discrete.has(action))key.setPointerCapture(e.pointerId);
+   press(action);
+  };
+  key.onlostpointercapture=()=>release(action);
+  key.onclick=e=>{
+   if(e.detail!==0)return;
+   if(discrete.has(action)||levelMenu)press(action);
+   else send(action,undefined,action==='down');
+  };
+  continue
+ }
  if(discrete.has(action)){key.onclick=()=>press(action);continue}
  key.onpointerdown=e=>{key.setPointerCapture(e.pointerId);press(action)};
  key.onlostpointercapture=()=>release(action);

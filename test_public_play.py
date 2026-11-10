@@ -83,6 +83,15 @@ class PublicPlayTest(unittest.TestCase):
         game.reset()
         self.assertEqual(game.step("up")["level"], 9)
 
+    def test_color_level_ten_starts_with_two_visible_digits(self):
+        torch.set_num_threads(1)
+        game = FunctionalTwoSession(RELEASE.with_name("functional-2"))
+        game.step("start")
+        game.frame = game.frame_for_level(10)
+        self.assertEqual(game.model.counter.read(game.frame)[0, -2:].tolist(), [1, 0])
+        game.step("noop")
+        self.assertEqual(game.model.counter.read(game.frame)[0, -2:].tolist(), [1, 0])
+
     def test_two_visitors_can_play_and_restart_independently(self):
         torch.set_num_threads(1)
         seed = NeuralSession(RELEASE / "model.pt", RELEASE / "first-piece.npz")

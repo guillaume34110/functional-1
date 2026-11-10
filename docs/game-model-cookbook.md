@@ -31,10 +31,14 @@ For an ambiguous failure, replay to the same verified screen and fork a short co
 
 Change the smallest part that explains the failure. In Adjustris, the learned tile representation helped preserve the stack, and separate readouts improved the piece preview and HUD. Fit those corrections only on training cases, then compare them against the baseline on held-out inputs. For a menu option that changes difficulty, verify the first playable screen and the actual timing it selects.
 
+For a color edition like V3, keep the recurrent model's original screen representation as its input and fit a display readout on recolored training frames. Carry over the episode splits and compare the readout to recolored validation and test frames. The browser can share the exported dynamics and load the color readout as a separate asset. [V3 training and results](../README.md#v3-color-training)
+
 ## 4. Verify the browser build and release it
 
 Freeze the chosen checkpoint, a verified opening frame or short observed prefix, the action order, any display readouts, and their checksums. Adapt [browser_export.py](../browser_export.py) and [the browser worker](../web/local-game.mjs) to export and run the new model's initial and recurrent steps. Check that the ONNX outputs agree with the Python model on representative inputs, including the recurrent state and the screens around a menu or pause transition.
 
 Replay held-out runs from the opening to the end screen and play a full game manually. Verify that a fresh game resets state, that the controls work at the chosen cadence, and that the browser continues playing after disconnecting the network once its assets load. The [complete game replay](../checks/v2_games.py) and [browser check](../checks/browser.py) are examples to adapt. Measure throughput on the target device.
+
+Test quick taps that begin and end between model steps as well as held inputs. In V3 the worker queues those taps, gives a quick Down tap two consecutive samples, and leaves two model steps between a rotation and an immediately queued drop. Check that the title screen still treats its arrows as single presses.
 
 The [Dockerfile](../Dockerfile) verifies the release checksums, exports the models, and serves static assets. Run the container on port 8765 and check `/health` before opening the game. For releases, use the same tested artifact and promote only the exact revision whose CI passed. The [deployment workflow](../.github/workflows/deploy.yml) advances the branch watched by Coolify after a successful main-branch build.

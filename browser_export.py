@@ -185,7 +185,7 @@ def main():
         (args.destination / name).write_text(page, encoding="utf-8")
     (args.destination / "health").write_text("ok\n", encoding="utf-8")
     web = Path(__file__).with_name("web")
-    for name in ("local-game.mjs", "native-render.mjs", "color-render.mjs"):
+    for name in ("local-game.mjs", "native-render.mjs", "color-render.mjs", "v3-intro.mjs"):
         copyfile(web / name, args.destination / name)
     color_page = (web / "color.html").read_text(encoding="utf-8")
     _, marker, controls = version_page("", browser=True).partition("<script>")

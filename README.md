@@ -2,7 +2,7 @@
 
 The [Functional 2 release](docs/functional-2-baseline.md#functional-2-release) adds a native 160×144 display, the title and pause menus, and automatic gravity. The hosted application opens [V2](https://tetris.progsoft.eu/) by default. Select [V1](https://tetris.progsoft.eu/v1) to compare with the original release. Each version keeps its own game state.
 
-Neuronal Tetris Color adds a Game Boy Color-style palette, seven candy-colored sprites, a bunny mascot, and new title, pause, game-over, and Progsoft credits screens. It uses the V2 recurrent gameplay model with a separate color readout fitted on the recolored captures. [Play V3](https://tetris.progsoft.eu/v3)
+Neuronal Tetris Color opens with a bunny pilot dodging asteroids and parachuting down to the animated title screen. It adds a Game Boy Color-style palette, seven candy-colored sprites, and new pause, game-over, and Progsoft credits screens. It uses the V2 recurrent gameplay model with a separate color readout fitted on the recolored captures. [Play V3](https://tetris.progsoft.eu/v3)
 
 Functional 1 is a small action-conditioned game model. You choose the buttons and the model produces the next screen from the current image and recurrent memory. The released checkpoint is the 329,982-byte V85 model from the verified human playthrough.
 
@@ -17,7 +17,7 @@ Open [the local game](http://127.0.0.1:8765/). Use the arrow keys to move and so
 
 On the V2 title screen, use Left or Down to lower the starting level and Right or Up to raise it. Press Z or Enter to play at the selected level.
 
-For V3, run the container below and open [the local color game](http://127.0.0.1:8765/v3). Use the same keyboard controls or the on-screen buttons. The title screen offers starting levels 1–9 and access to the credits. The game keeps the selected level when you restart.
+For V3, run the container below and open the local color game. Skip the opening animation with Enter, Z, or the Skip intro button. V3 also honors your system's reduced-motion setting. Choose starting level 1–10 with the arrow keys or the level buttons on the title screen. In play, tap Down for a quick drop or hold it to keep dropping. The game keeps the selected level when you restart. [Local V3](http://127.0.0.1:8765/v3)
 
 ![Functional 1 desktop design concept](docs/design/functional-1-desktop.png)
 
@@ -32,7 +32,7 @@ docker build -t functional-1 .
 docker run --rm -p 8765:8765 functional-1
 ```
 
-Run `python checks/browser.py` against the running container to verify the three releases. The V3 check covers level selection, credits, pause and resume, game over, restart, and play with the network disconnected.
+Run `python checks/browser.py` against the running container to verify the three releases. The V3 check covers the intro, level selection and the level 10 HUD, quick rotations and drops, credits, pause and resume, game over, and restart. It plays a full game with the network disconnected after loading the model.
 
 ## Training
 
