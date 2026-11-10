@@ -64,7 +64,7 @@ def candidates(grid):
 def without(grid, cells):
     result = grid.copy()
     for cell in cells:
-        result[cell] = -1
+        result[tuple(cell)] = -1
     return result
 
 

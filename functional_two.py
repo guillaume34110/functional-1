@@ -13,7 +13,7 @@ from play import NeuralSession
 class FunctionalTwoSession(NeuralSession):
     levels = tuple(range(1, 10))
 
-    def __init__(self, release: Path):
+    def __init__(self, release: Path, motion: Path | None = None):
         self.renderer = NativeRenderer(release / "native-render.npz")
         with np.load(release / "menus.npz", allow_pickle=False) as bundle:
             self.title = bundle["title"]
@@ -27,6 +27,14 @@ class FunctionalTwoSession(NeuralSession):
         self.title_logo = self.title[1:118:2, 1::2]
         self.level = self.levels[0]
         super().__init__(release / "model.pt", release / "first-piece.npz")
+        if motion is not None:
+            from scene_model import scene_from_weights
+
+            readout = torch.load(motion, map_location="cpu", weights_only=True)
+            if set(readout) != {"motion_offsets", "motion_confidence", "motion_head.0.weight",
+                                "motion_head.0.bias", "motion_head.2.weight", "motion_head.2.bias"}:
+                raise ValueError("invalid V3 motion checkpoint")
+            self.model = scene_from_weights({**self.model.state_dict(), **readout}).eval()
 
     def frame_for_level(self, level):
         frame = torch.from_numpy(self.frames[-1].copy())[None, None]

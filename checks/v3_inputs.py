@@ -115,3 +115,34 @@ def exercise_v3_inputs(page, canvas, level):
         page.mouse.up()
         page.evaluate("window.restoreInputProbe()")
     print("V3 level 10 controls: five-tap burst, both walls, overlapping holds, held priority and blur", flush=True)
+
+
+def exercise_v3_cadence(page, canvas):
+    def delay_worker(route):
+        response = route.fetch()
+        source = response.text()
+        anchor = "const elapsed = await advance(action);"
+        assert source.count(anchor) == 1
+        delayed = anchor + "\n   if (steps === 12) await new Promise(resolve => setTimeout(resolve, 150));"
+        route.fulfill(status=response.status, content_type="application/javascript",
+                      body=source.replace(anchor, delayed))
+
+    page.route("**/local-game.mjs?version=v3", delay_worker)
+    page.reload()
+    expect(canvas).to_have_attribute("data-screen", "title", timeout=60000)
+    page.evaluate("""() => {
+      const status = document.querySelector('#status');
+      window.stepTimes = {};
+      new MutationObserver(() => {
+        const step = Number(status.textContent.split(' ')[0]);
+        if (Number.isInteger(step)) window.stepTimes[step] = performance.now();
+      }).observe(status, {childList: true});
+    }""")
+    page.get_by_role("button", name="Play", exact=True).click()
+    page.wait_for_function("window.stepTimes[13] !== undefined", timeout=10000)
+    delayed, next_gap = page.evaluate("""() => [
+      window.stepTimes[12] - window.stepTimes[11],
+      window.stepTimes[13] - window.stepTimes[12]
+    ]""")
+    assert delayed > 130 and next_gap >= 20, (delayed, next_gap)
+    print(f"V3 delayed step: {delayed:.1f} ms, next step: {next_gap:.1f} ms", flush=True)

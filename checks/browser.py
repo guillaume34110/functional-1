@@ -2,11 +2,10 @@
 import os
 import re
 from pathlib import Path
-from time import monotonic
 
 from playwright.sync_api import expect, sync_playwright
 
-from v3_inputs import exercise_v3_inputs
+from v3_inputs import exercise_v3_cadence, exercise_v3_inputs
 
 
 URL = os.environ.get("GAME_URL", "http://127.0.0.1:8765/").rstrip("/")
@@ -23,9 +22,24 @@ def wait_steps(page, minimum, timeout=20000):
 
 def cadence(page, label, start):
     wait_steps(page, start)
-    started = monotonic()
-    wait_steps(page, start + 30)
-    print(f"{label} offline: {30 / (monotonic() - started):.1f} steps/s", flush=True)
+    rate = page.evaluate("""() => new Promise((resolve, reject) => {
+      const status = document.querySelector('#status');
+      const steps = () => Number(status.textContent.split(' ')[0]);
+      const first = steps(), started = performance.now();
+      const observer = new MutationObserver(() => {
+        const advance = steps() - first;
+        if (advance < 30 || !Number.isFinite(advance)) return;
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(1000 * advance / (performance.now() - started));
+      });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error('The model did not advance 30 steps'));
+      }, 20000);
+      observer.observe(status, {childList: true});
+    })""")
+    print(f"{label} offline: {rate:.1f} steps/s", flush=True)
 
 
 with sync_playwright() as playwright:
@@ -303,5 +317,6 @@ with sync_playwright() as playwright:
     expect(canvas).to_have_attribute("data-screen", "title", timeout=60000)
     expect(skip_intro).to_be_hidden()
     expect(intro).to_be_hidden()
+    exercise_v3_cadence(page, canvas)
     assert not shape_warnings, shape_warnings[:3]
     browser.close()

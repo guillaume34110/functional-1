@@ -35,6 +35,8 @@ For a color edition like V3, keep the recurrent model's original screen represen
 
 If a custom title menu has a small state space, train its transitions separately. V3 trains from the current level and button, predicts the next level and confirmation, and replays independent button sequences through the exported menu. Verify that the rendered selection reaches gameplay and changes the first unassisted drop. [V3 difficulty menu](../README.md#v3-difficulty-menu)
 
+To diagnose motion, fork the reference emulator from verified positions and compare a control sequence with idle from the same frame. Sample open space, both walls, and contact with the pile or floor. Warm the model from the observed prefix and measure short rollouts against complete reference boards. Keep source games disjoint between fitting and test. [V3 motion training](../README.md#v3-motion-training)
+
 ## 4. Verify the browser build and release it
 
 Freeze the chosen checkpoint, a verified opening frame or short observed prefix, the action order, any display readouts, and their checksums. Adapt [browser_export.py](../browser_export.py) and [the browser worker](../web/local-game.mjs) to export and run the new model's initial and recurrent steps. Check that the ONNX outputs agree with the Python model on representative inputs, including the recurrent state and the screens around a menu or pause transition.
