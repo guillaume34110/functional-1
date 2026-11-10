@@ -58,9 +58,15 @@ python train_color.py --corpus "$ORIGINAL_CORPUS" \
 
 The converter keeps the original action sequence and split for every episode. It pairs the 80×72 source screens with 160×144 indexed-color targets using the artwork in [color_art.py](color_art.py). The color readout fits a categorical tile output for the board and HUD from the training split. Validation and test compare those outputs with the recolored targets without updating the readout. The run writes the reformatted dataset, its manifest, and the fitted `color.json`.
 
-The container uses the verified readout in `releases/functional-3/`. In the browser, the original recurrent output feeds the next model step and the color readout produces the displayed screen. The two versions share the V2 ONNX graphs, so V3 downloads only the additional color data.
+The container uses the verified readout in `releases/functional-3/`. In the browser, the original recurrent output feeds the next model step and the color readout produces the displayed screen. V3 shares the V2 gameplay graphs and loads its own color and title assets.
 
 The released fit used 82 training episodes and preserved 9 validation and 9 test episodes. The readout matched every evaluated board and HUD tile in both held-out splits. Those figures measure color rendering against the converted targets.
+
+### V3 difficulty menu
+
+Install `onnx==1.22.0` alongside the project requirements, then run `python train_v3_menu.py output/v3-menu`. The script trains a 508-parameter network from the custom title menu's 80 level and button pairs. The current level and the button are its inputs. The two outputs predict the next level and whether to start playing. Validation and test replay separate button sequences through the model's own predictions and reuse the same finite set of level and button pairs.
+
+The browser runs the title model locally with ONNX Runtime, draws its selected level inside the game screen, and uses that level to initialize the recurrent gameplay model. The browser check compares the first unassisted drop at levels 1 and 10.
 
 ## What worked
 

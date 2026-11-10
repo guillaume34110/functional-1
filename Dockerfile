@@ -20,7 +20,7 @@ RUN (cd releases/functional-1 && sha256sum -c SHA256SUMS) && \
     (cd releases/functional-2 && sha256sum -c SHA256SUMS) && \
     (cd releases/functional-3 && sha256sum -c SHA256SUMS) && \
     PYTHONWARNINGS=ignore python browser_export.py /site && \
-    gzip -k /site/models/*.onnx /site/models/v3-color.json
+    gzip -k /site/models/*.onnx /site/models/v3-*.json
 
 FROM nginxinc/nginx-unprivileged:1.28-alpine
 COPY web/nginx.conf /etc/nginx/nginx.conf
