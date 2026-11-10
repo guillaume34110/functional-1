@@ -6,7 +6,7 @@ ort.env.wasm.numThreads = 1;
 
 const requested = new URL(import.meta.url).searchParams.get("version");
 const version = requested === "v1" || requested === "v3" ? requested : "v2";
-const root = new URL(`./models/${version === "v3" ? "v2" : version}`, import.meta.url).href.split("?")[0];
+const root = new URL(`./models/${version}`, import.meta.url).href.split("?")[0];
 const options = {
  executionProviders: ["wasm"],
  graphOptimizationLevel: "disabled",
@@ -37,7 +37,7 @@ async function play() {
   return response.json();
  };
  const [config, initial, recurrent, skin, menuModel, menuArt] = await Promise.all([
-  readJson(root + ".json"),
+  readJson(version === "v3" ? "/models/v2.json" : root + ".json"),
   ort.InferenceSession.create(root + "-initial.onnx", options),
   ort.InferenceSession.create(root + "-recurrent.onnx", options),
   version === "v3" ? readJson("/models/v3-color.json") : null,
@@ -209,8 +209,9 @@ async function play() {
    publish(image, elapsed);
   }
   const now = performance.now();
-  // Preserve the clock phase without accumulating missed ticks after a slow inference.
-  deadline = version !== "v1" ? Math.max(deadline + tick, now) : started + tick;
+  // Give the displayed frame time to register before resuming from a slow inference.
+  const minimumDelay = version === "v3" ? tick / 3 : 0;
+  deadline = version !== "v1" ? Math.max(deadline + tick, now + minimumDelay) : started + tick;
   setTimeout(() => update().catch(fail), Math.max(0, deadline - now));
  }
  await update();

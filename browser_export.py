@@ -192,17 +192,20 @@ def main():
     if not marker:
         raise ValueError("missing shared browser controls")
     (args.destination / "v3/index.html").write_text(color_page + marker + controls, encoding="utf-8")
+    color_release = RELEASE.with_name("functional-3")
     for asset in ("color.json", "menu.onnx", "menu-title.json"):
-        copyfile(RELEASE.with_name("functional-3") / asset, models / f"v3-{asset}")
+        copyfile(color_release / asset, models / f"v3-{asset}")
     versions = {
         "v1": NeuralSession(RELEASE / "model.pt", RELEASE / "first-piece.npz"),
         "v2": FunctionalTwoSession(RELEASE.with_name("functional-2")),
+        "v3": FunctionalTwoSession(RELEASE.with_name("functional-2"), color_release / "motion.pt"),
     }
     for version, game in versions.items():
-        metadata = json.dumps(release_metadata(game), separators=(",", ":"))
-        (models / f"{version}.json").write_text(metadata + "\n", encoding="utf-8")
+        if version != "v3":
+            metadata = json.dumps(release_metadata(game), separators=(",", ":"))
+            (models / f"{version}.json").write_text(metadata + "\n", encoding="utf-8")
         export_graph(game.model, game.frame, None, models / f"{version}-initial.onnx")
-        if version == "v2":
+        if isinstance(game, FunctionalTwoSession):
             game.step("start")
         game.step("noop")
         export_graph(game.model, game.frame, game.state, models / f"{version}-recurrent.onnx")

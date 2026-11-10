@@ -58,7 +58,7 @@ python train_color.py --corpus "$ORIGINAL_CORPUS" \
 
 The converter keeps the original action sequence and split for every episode. It pairs the 80×72 source screens with 160×144 indexed-color targets using the artwork in [color_art.py](color_art.py). The color readout fits a categorical tile output for the board and HUD from the training split. Validation and test compare those outputs with the recolored targets without updating the readout. The run writes the reformatted dataset, its manifest, and the fitted `color.json`.
 
-The container uses the verified readout in `releases/functional-3/`. In the browser, the original recurrent output feeds the next model step and the color readout produces the displayed screen. V3 shares the V2 gameplay graphs and loads its own color and title assets.
+The container uses the verified readouts in `releases/functional-3/`. In the browser, the recurrent output feeds the next model step and the color readout produces the displayed screen. V3 builds on the V2 gameplay checkpoint and exports its own browser graphs with the fitted motion readout.
 
 The released fit used 82 training episodes and preserved 9 validation and 9 test episodes. The readout matched every evaluated board and HUD tile in both held-out splits. Those figures measure color rendering against the converted targets.
 
@@ -67,6 +67,19 @@ The released fit used 82 training episodes and preserved 9 validation and 9 test
 Install `onnx==1.22.0` alongside the project requirements, then run `python train_v3_menu.py output/v3-menu`. The script trains a 508-parameter network from the custom title menu's 80 level and button pairs. The current level and the button are its inputs. The two outputs predict the next level and whether to start playing. Validation and test replay separate button sequences through the model's own predictions and reuse the same finite set of level and button pairs.
 
 The browser runs the title model locally with ONNX Runtime, draws its selected level inside the game screen, and uses that level to initialize the recurrent gameplay model. The browser check compares the first unassisted drop at levels 1 and 10.
+
+### V3 motion training
+
+```sh
+python collect_v3_motion.py output/v3-motion-data
+python train_v3_motion.py output/v3-motion-data releases/functional-2/model.pt output/v3-motion-fit
+```
+
+The collector records 30 Adjustris games and forks 480 verified positions into 10 short input sequences each. The branches cover rotation taps and bursts, lateral taps and holds, a held drop, and idle. Train, validation, and test use different source games. The fitted pose readout uses the visible piece, nearby cells, and causal model state. In the released browser it contributes to rotations and lateral taps, with the existing checks for legal positions and a clear destination.
+
+On the reserved test games, exact boards after four model steps rose from 25 to 43 of 192 rotation bursts, from 54 to 60 of 192 lateral taps, and from 64 to 67 of 192 lateral holds. Idle and held-drop results matched the base model. These scores include differences in gravity and deposit timing as well as the response to the buttons.
+
+Run `python -m unittest test_v3_motion` for exact ROM witnesses at the walls and in open space. The browser suite covers rapid controls at level 10 and checks the interval after an intentionally delayed model step.
 
 ## What worked
 

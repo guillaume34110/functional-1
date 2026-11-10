@@ -1277,7 +1277,8 @@ class ClearAnimationSceneDynamics(ClearRoutingSceneDynamics):
         details = super().scene_details(tokens, actions, state)
         age = torch.zeros_like(actions) if memory is None else memory[:, 0, 0].long()
         onset = self.animation_start_logit(tokens, details)
-        active_mask = (age > 0) | (onset > 0)
+        # Negative ages belong to the terminal animation in the shared state channel.
+        active_mask = (age > 0) | ((age == 0) & (onset > 0))
         active = active_mask.nonzero().flatten()
         next_memory = torch.zeros_like(details["state"][:, -1:])
         details["animation_memory"] = next_memory
@@ -1584,7 +1585,7 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                  a_placement=None, pause=None, gravity=None, wall_poses=None, lateral_motion=None,
                  wall_first_poses=None, visible_stack_guard=None, held_wall_gravity=None,
                  gravity_spawn_poses=None, sustained_repeat=None, contact_rotations=None, preview_prior=None,
-                 free_rotations=None, wall_phase_poses=None):
+                 free_rotations=None, wall_phase_poses=None, motion=None):
         from counter_model import CounterReadout
 
         super().__init__(codebook, object_shapes, object_tiles, preview_patterns, flash_id, fill_id, panels)
@@ -1673,6 +1674,17 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
                 raise ValueError("phased rotations must alternate two poses of one piece")
         self.register_buffer("wall_phase_poses", wall_phase_poses)
         self.register_buffer("wall_phase_shapes", phase_shapes, persistent=False)
+        offsets, confidence, hidden = (None, None, 0) if motion is None else motion
+        if offsets is not None and (
+                offsets.dtype != torch.long or offsets.ndim != 2 or offsets.shape[1] != 3
+                or ((offsets[:, 0] < 0) | (offsets[:, 0] >= len(object_shapes))).any()
+                or (offsets[:, 1:].abs() > 3).any() or confidence.shape != (len(ACTIONS),)
+                or not torch.isfinite(confidence).all()):
+            raise ValueError("invalid learned motion vocabulary")
+        self.register_buffer("motion_offsets", offsets)
+        self.register_buffer("motion_confidence", confidence)
+        self.motion_head = nn.Sequential(nn.Linear(len(object_shapes) + 62, hidden), nn.ReLU(),
+                                         nn.Linear(hidden, len(offsets))) if offsets is not None else None
         if preview_prior is not None and (
                 visible_stack_guard is None or not pulsed or preview_prior.shape != (len(preview_patterns),)
                 or not preview_prior.is_floating_point() or not torch.isfinite(preview_prior).all()
@@ -1980,6 +1992,8 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             self.apply_lateral_motion(tokens, action, details, opening, continued)
         if self.wall_poses is not None and (not observed or wall_phase is not None):
             self.apply_wall_rotation(tokens, action, details, first_turn, observed=observed)
+        if self.motion_head is not None and not observed:
+            self.apply_motion_readout(tokens, action, details)
         if self.visible_stack_guard is not None and not observed:
             self.keep_visible_stack(tokens, action, details)
         prediction = self.decode_scene(tokens, details, hard=True)
@@ -2292,6 +2306,62 @@ class CounterSceneDynamics(ComposeContactSceneDynamics):
             candidate = torch.where(blocked, fallback, candidate)
             use = use | blocked
         self.select_rendered_pose(details, active[use], candidate[use], torch.zeros_like(candidate[use]))
+
+    def motion_context(self, tokens, action, details, *, collect_samples=False):
+        known, _, _ = self.continuity_signals(tokens, details)
+        current = details["current"]["joint"].flatten(1).argmax(1)
+        kind, row, column = current // 180, current % 180 // 10, current % 10
+        masks = self.shape_masks.flatten(0, 1).bool()
+        piece = masks[current]
+        background = tokens[:, :, 2:12].masked_fill(piece, self.blank_id)
+        rotating = (action == ACTIONS.index("a")) | (action == ACTIONS.index("b"))
+        phased = torch.isin(kind, self.wall_phase_shapes) if self.wall_phase_shapes is not None else rotating & False
+        moving = (action == ACTIONS.index("left")) | (action == ACTIONS.index("right"))
+        if collect_samples:
+            moving = moving | (action == ACTIONS.index("down"))
+        else:
+            moving = moving & (action != details["previous_action"])
+        eligible = known & (details["mode"].argmax(1) == 0) & ((rotating & ~phased) | moving)
+        eligible = eligible & (~piece | (tokens[:, :, 2:12] == self.object_tiles[kind, None, None])).flatten(1).all(1)
+        active = eligible.nonzero().flatten()
+        step = torch.arange(5, device=tokens.device)
+        padded = F.pad(background[active] != self.blank_id, (2, 2, 2, 2), value=True)
+        vicinity = padded[torch.arange(active.size(0), device=tokens.device)[:, None, None],
+                          row[active, None, None] + step[None, :, None],
+                          column[active, None, None] + step[None, None, :]].flatten(1)
+        previous = details["previous_action"][active].clamp(0, len(ACTIONS))
+        phase = details.get("wall_phase", torch.zeros_like(action))[active].clamp(0, 7)
+        held = details["state"][active, 18, 0, 0]
+        age = details["state"][active, 17, :, 2:12].masked_fill(~piece[active], 255).amin((1, 2))
+        scalars = torch.stack((row[active] / 17, column[active] / 9,
+                               held.clamp(0, 24) / 24, age.clamp(0, 32) / 32), dim=1)
+        neighbors = details["contact_neighbors"][active][:, [0, 1, 2, 3, 5, 6, 7, 8]]
+        features = torch.cat((F.one_hot(kind[active], len(self.object_shapes)),
+                              F.one_hot(action[active], len(ACTIONS)), F.one_hot(previous, len(ACTIONS) + 1),
+                              F.one_hot(phase, 8), scalars, neighbors, vicinity), dim=1)
+        return active, current[active], background[active], features.float()
+
+    def apply_motion_readout(self, tokens, action, details):
+        active, current, board, features = self.motion_context(tokens, action, details)
+        if not torch.onnx.is_in_onnx_export() and not len(active):
+            return
+        confidence, choice = self.motion_head(features).softmax(1).max(1)
+        target, dy, dx = self.motion_offsets[choice].unbind(1)
+        kind = current // 180
+        y, x = current % 180 // 10 + dy, current % 10 + dx
+        pose = target * 180 + y.clamp(0, 17) * 10 + x.clamp(0, 9)
+        button = action[active]
+        rotating = (button == ACTIONS.index("a")) | (button == ACTIONS.index("b"))
+        direction = torch.where(button == ACTIONS.index("left"), -1, 1)
+        lateral = ((dx == 0) | (dx == direction)) & (dy >= 0) & (dy <= 1)
+        same_piece = self.object_tiles[target] == self.object_tiles[kind]
+        fits = self.valid_poses.flatten()[pose] & (y >= 0) & (y < 18) & (x >= 0) & (x < 10)
+        mask = self.shape_masks.flatten(0, 1)[pose].bool()
+        clear = (~mask | (board == self.blank_id)).flatten(1).all(1)
+        use = fits & clear & same_piece & (rotating | (lateral & (target == kind)))
+        previous = details["next"]["joint"][active].flatten(1).argmax(1)
+        use = use & (pose != previous) & (confidence >= self.motion_confidence[button])
+        self.select_rendered_pose(details, active[use], pose[use], torch.zeros_like(pose[use]))
 
     def select_rendered_pose(self, details, active, pose, mode):
         next_piece = details["next"]
@@ -2719,7 +2789,9 @@ def scene_from_weights(weights):
                           weights.get("visible_stack_guard"), weights.get("held_wall_gravity"),
                           weights.get("gravity_spawn_poses"), weights.get("sustained_repeat"),
                           weights.get("contact_rotations"), weights.get("preview_prior"), weights.get("free_rotations"),
-                          weights.get("wall_phase_poses"))
+                          weights.get("wall_phase_poses"),
+                          (weights["motion_offsets"], weights["motion_confidence"], len(weights["motion_head.0.bias"]))
+                          if "motion_offsets" in weights else None)
         model = family(*arguments)
     if family is RelativeProposalSceneDynamics and "proposal_gate_calibration" not in weights:
         weights = {**weights, "proposal_gate_calibration": model.proposal_gate_calibration.detach()}
