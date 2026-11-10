@@ -59,6 +59,7 @@ async function play() {
    [1, config.initial_state[0].length, 18, 20])
   : null;
  let pixels, carry, phase, suspended, menu, steps, previous;
+ let rotationGap = 0;
  let renderedPixels, renderedFrame;
  function display(frame) {
   if (!config.native) return frame;
@@ -77,6 +78,7 @@ async function play() {
   credits = ending = false;
   endUntil = 0;
   steps = 0;
+  rotationGap = 0;
  }
  function publish(image, elapsed) {
   const update = {
@@ -166,10 +168,16 @@ async function play() {
     publish(title, 0);
    }
   } else if (!paused && (!menu || pulses.length)) {
-   const pulse = pulses.shift();
+   const button = pulses[0]?.button ?? held;
+   // The learned drop can stall when Down follows a rotation with fewer than two intervening samples.
+   const deferDrop = version === "v3" && !menu && !suspended && button === "down" && rotationGap > 0;
+   const pulse = deferDrop ? undefined : pulses.shift();
    // A soft drop can take two samples in the learned dynamics, even for a tap.
    if (pulse?.softDrop && !menu && !suspended) pulses.unshift({ button: "down" });
-   const action = config.actions.indexOf(pulse?.button ?? held);
+   const action = config.actions.indexOf(deferDrop ? "noop" : button);
+   if (version === "v3" && !menu && !suspended) {
+    rotationGap = button === "a" || button === "b" ? 2 : Math.max(0, rotationGap - 1);
+   }
    const elapsed = await advance(action);
    const image = credits ? creditsPanel : ending ? overPanel : suspended && skin ? pausePanel :
     menu ?? display(suspended ? pausePanel : pixels);

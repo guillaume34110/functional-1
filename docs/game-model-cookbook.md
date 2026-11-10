@@ -39,6 +39,6 @@ Freeze the chosen checkpoint, a verified opening frame or short observed prefix,
 
 Replay held-out runs from the opening to the end screen and play a full game manually. Verify that a fresh game resets state, that the controls work at the chosen cadence, and that the browser continues playing after disconnecting the network once its assets load. The [complete game replay](../checks/v2_games.py) and [browser check](../checks/browser.py) are examples to adapt. Measure throughput on the target device.
 
-Test quick taps that begin and end between model steps as well as held inputs. In V3 the worker queues those taps, and a quick Down tap supplies the two consecutive input samples needed to start a soft drop. Check that the title screen still treats its arrows as single presses.
+Test quick taps that begin and end between model steps as well as held inputs. In V3 the worker queues those taps, gives a quick Down tap two consecutive samples, and leaves two model steps between a rotation and an immediately queued drop. Check that the title screen still treats its arrows as single presses.
 
 The [Dockerfile](../Dockerfile) verifies the release checksums, exports the models, and serves static assets. Run the container on port 8765 and check `/health` before opening the game. For releases, use the same tested artifact and promote only the exact revision whose CI passed. The [deployment workflow](../.github/workflows/deploy.yml) advances the branch watched by Coolify after a successful main-branch build.

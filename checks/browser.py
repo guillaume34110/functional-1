@@ -193,18 +193,41 @@ with sync_playwright() as playwright:
       }
       return positions.length === 4 ? [Math.min(...positions), Math.max(...positions)] : null;
     }"""
-    page.keyboard.press("Z")
-    page.wait_for_function(f"() => {{ const rows = ({piece_extent})(); return rows && rows[1] - rows[0] === 2; }}")
-    page.get_by_role("button", name="Rotate with X", exact=True).click()
-    page.wait_for_function(f"() => {{ const rows = ({piece_extent})(); return rows && rows[1] - rows[0] === 1; }}")
-    before_drop = page.evaluate(piece_extent)[0]
-    page.evaluate("""() => {
-      for (const type of ['keydown', 'keyup']) {
-        window.dispatchEvent(new KeyboardEvent(type, {key:'ArrowDown', bubbles:true}));
-      }
-    }""")
+    # At this opening phase, Down used to stall after the second rotation.
+    rotated, restored = page.evaluate(f"""() => new Promise((resolve, reject) => {{
+      const status = document.querySelector('#status');
+      const read = {piece_extent};
+      const tap = key => {{
+        for (const type of ['keydown', 'keyup']) {{
+          window.dispatchEvent(new KeyboardEvent(type, {{key, bubbles: true}}));
+        }}
+      }};
+      let turned;
+      const watcher = new MutationObserver(() => {{
+        const step = Number(status.textContent.split(' ')[0]);
+        if (step === 12) tap('Z');
+        if (step === 14) {{
+          turned = read();
+          document.querySelector('[data-action="b"]').click();
+        }}
+        if (step === 16) {{
+          const back = read();
+          tap('ArrowDown');
+          watcher.disconnect();
+          clearTimeout(deadline);
+          resolve([turned, back]);
+        }}
+      }});
+      const deadline = setTimeout(() => {{
+        watcher.disconnect();
+        reject(new Error('Did not reach the rotation and drop checkpoints'));
+      }}, 5000);
+      watcher.observe(status, {{childList: true}});
+    }})""")
+    assert rotated and rotated[1] - rotated[0] == 2
+    assert restored and restored[1] - restored[0] == 1
     page.wait_for_function(f"row => {{ const rows = ({piece_extent})(); return rows && rows[0] > row; }}",
-                           arg=before_drop, timeout=900)
+                           arg=restored[0], timeout=900)
     wait_steps(page, 2)
     assert canvas.evaluate("""canvas => {
       const pixels = canvas.getContext('2d').getImageData(16, 0, 80, 144).data;
