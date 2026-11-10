@@ -44,7 +44,7 @@ async function play() {
   version === "v3" ? ort.InferenceSession.create("/models/v3-menu.onnx", options) : null,
   version === "v3" ? readJson("/models/v3-menu-title.json") : null,
  ]);
- const render = skin ? colorRenderer(skin, unpack) :
+ const render = skin ? colorRenderer(skin, unpack, config.counter_digits) :
   config.native ? nativeRenderer(config.native.keys, config.native.tiles) : pixels => pixels;
  const initialFrame = unpack(config.initial_frame);
  const levelFrames = config.level_frames?.map(unpack);

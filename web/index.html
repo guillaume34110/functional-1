@@ -85,7 +85,7 @@ const creditsButton=document.querySelector('#credits');
 const liveInput=streaming||browserLocal;
 const socket=streaming?new WebSocket(new URL('/stream',location.href).href.replace(/^http/,'ws')):null;
 function send(pulse,reset,softDrop=false){
- const input={held:held.at(-1)??'noop',paused,pulse,reset,softDrop};
+ const input={held:held.at(-1)?.action??'noop',paused,pulse,reset,softDrop};
  if(worker)worker.postMessage(input);
  else if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(input));
 }
@@ -93,33 +93,35 @@ function setPaused(value){
  paused=value;
  document.querySelector('#pause').textContent=paused?"Resume":"Pause";
 }
-function press(action){
+function press(action,source=action){
  const selectLevel=levelMenu&&['left','right','up','down'].includes(action);
  if(selectLevel||(menu&&(action==='a'||action==='start')))setPaused(false);
  if(selectLevel||discrete.has(action)){if(liveInput)send(action);else pulses.push(action)}
- else if(!held.includes(action)){
-  held.push(action);
-  const softDrop=colorVersion&&action==='down';
-  send(action,undefined,softDrop)
+ else if(!held.some(input=>input.source===source)){
+  const pulse=held.some(input=>input.action===action)?undefined:action;
+  held.push({action,source});
+  send(pulse,undefined,colorVersion&&pulse==='down')
  }
 }
-function release(action){held=held.filter(x=>x!==action);send()}
+function release(source){held=held.filter(input=>input.source!==source);send()}
+function keyAction(e){return buttons[colorVersion&&e.key.length===1?e.key.toLowerCase():e.key]}
+function keySource(e,action){return colorVersion?`key:${e.code||action}`:action}
 window.addEventListener('keydown',e=>{
  if(e.key==='Enter'&&e.target.closest?.('button, a'))return;
  if(colorVersion&&(e.ctrlKey||e.metaKey||e.altKey))return;
- const action=buttons[colorVersion&&e.key.length===1?e.key.toLowerCase():e.key];if(!action)return;e.preventDefault();
- if(!e.repeat)press(action);
+ const action=keyAction(e);if(!action)return;e.preventDefault();
+ if(!e.repeat)press(action,keySource(e,action));
 });
-window.addEventListener('keyup',e=>{const action=buttons[e.key];if(action){e.preventDefault();release(action)}});
+window.addEventListener('keyup',e=>{const action=keyAction(e);if(action){e.preventDefault();release(keySource(e,action))}});
 for(const key of document.querySelectorAll('[data-action]')){
  const action=key.dataset.action;
  if(colorVersion){
   key.onpointerdown=e=>{
    if(e.button!==0)return;
    if(!discrete.has(action))key.setPointerCapture(e.pointerId);
-   press(action);
+   press(action,`pointer:${e.pointerId}`);
   };
-  key.onlostpointercapture=()=>release(action);
+  key.onlostpointercapture=e=>release(`pointer:${e.pointerId}`);
   key.onclick=e=>{
    if(e.detail!==0)return;
    if(discrete.has(action)||levelMenu)press(action);
@@ -177,7 +179,7 @@ if(worker){
  socket.onclose=()=>{status.textContent="Connection closed. Reload to reconnect."};
 }else setInterval(async()=>{if(busy||(!resetRequested&&(paused||(menu&&!pulses.length))))return;
  const reset=resetRequested;resetRequested=false;busy=true;
- try{draw(reset?await request('/reset',{}):await request('/step',{action:pulses.shift()??held.at(-1)??'noop'}))}
+ try{draw(reset?await request('/reset',{}):await request('/step',{action:pulses.shift()??held.at(-1)?.action??'noop'}))}
  catch(e){paused=true;status.textContent=e.message}finally{busy=false}},1000/15);
 </script>
 </html>

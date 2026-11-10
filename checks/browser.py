@@ -6,6 +6,8 @@ from time import monotonic
 
 from playwright.sync_api import expect, sync_playwright
 
+from v3_inputs import exercise_v3_inputs
+
 
 URL = os.environ.get("GAME_URL", "http://127.0.0.1:8765/").rstrip("/")
 TITLE = "Press Z or Enter to play"
@@ -188,6 +190,14 @@ with sync_playwright() as playwright:
       return digits.some((red, i) => i % 4 === 0 && red > 150);
     }"""
     assert canvas.evaluate(tens_pixel), "level 10 should draw a tens digit in play"
+    assert canvas.evaluate("""canvas => {
+      const digit = canvas.getContext('2d').getImageData(145, 68, 5, 11).data;
+      for (let y = 0; y < 11; y++) {
+        if (!Array.from({length: 5}, (_, x) => (y * 5 + x) * 4)
+          .some(i => digit[i] > 240 && digit[i + 1] > 230)) return false;
+      }
+      return true;
+    }"""), "score glyphs should have 11 high-contrast rows"
     fast_drop = page.wait_for_function(first_drop).json_value()
     page.get_by_role("button", name="Restart", exact=True).click()
     expect(canvas).to_have_attribute("data-screen", "title")
@@ -259,8 +269,12 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="Resume", exact=True).click()
     expect(canvas).to_have_attribute("data-screen", "game")
     cadence(page, "V3", 10)
+    score_pixels = """() => document.querySelector('#screen').getContext('2d')
+      .getImageData(112, 68, 40, 11).data.toString()"""
+    before_score = page.evaluate(score_pixels)
     page.keyboard.down("ArrowDown")
     try:
+        page.wait_for_function(f"before => ({score_pixels})() !== before", arg=before_score, timeout=12000)
         expect(canvas).to_have_attribute("data-screen", "over", timeout=120000)
         capture("game-over")
         expect(canvas).to_have_attribute("data-screen", "title", timeout=15000)
@@ -273,6 +287,9 @@ with sync_playwright() as playwright:
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     expect(page.get_by_role("button", name="Rotate with Z")).to_be_visible()
     capture("mobile")
+    page.get_by_role("button", name="Restart", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "title")
+    exercise_v3_inputs(page, canvas, level)
     assert requests[before:] == [], requests[before:]
     assert sockets == [], sockets
     context.set_offline(False)
