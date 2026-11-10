@@ -8,6 +8,7 @@ import torch
 
 from functional_two import FunctionalTwoSession
 from model import ACTIONS
+from native_render import tile_keys
 from play import RELEASE, NeuralSession
 from token_model import decode_tokens
 
@@ -40,6 +41,7 @@ def release_metadata(session):
         data["starts"] = session.starts.tolist()
         data["level_frames"] = [encode(session.frame_for_level(level).numpy()) for level in session.levels]
         data["color_level_10"] = encode(session.frame_for_level(10).numpy())
+        data["counter_digits"] = tile_keys(model.counter.glyphs.numpy()).tolist()
         data["native"] = {
             "keys": session.renderer.keys.tolist(),
             "tiles": session.renderer.tiles.reshape(-1, 64).tolist(),
