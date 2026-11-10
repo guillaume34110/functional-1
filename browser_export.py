@@ -10,6 +10,7 @@ import onnx
 from onnx import TensorProto, helper
 import torch
 from torch.onnx import symbolic_helper
+from torch.onnx.symbolic_opset16 import scatter_reduce as default_scatter_reduce
 from torch.onnx.symbolic_opset9 import flatten as default_flatten
 
 from browser_assets import release_metadata
@@ -63,6 +64,15 @@ def flatten(graph, x, start, end):
     if last < rank:
         dimensions.append(graph.op("Shape", x, start_i=last))
     return graph.op("Reshape", x, graph.op("Concat", *dimensions, axis_i=0), allowzero_i=1)
+
+
+def scatter_reduce(graph, data, dim, indices, updates, reduction, include_self):
+    if (symbolic_helper._parse_arg(dim, "i") == 1
+            and symbolic_helper._parse_arg(reduction, "s") == "amax"
+            and symbolic_helper._parse_arg(include_self, "b")):
+        # Axis 1 cannot be scalar, so the export needs no scalar reshape/squeeze branches.
+        return graph.op("ScatterElements", data, indices, updates, axis_i=1, reduction_s="max")
+    return default_scatter_reduce(graph, data, dim, indices, updates, reduction, include_self)
 
 
 def runtime_graph(model):
@@ -162,7 +172,8 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(1)
     torch.backends.mha.set_fastpath_enabled(False)
-    for name, symbolic in (("isin", membership), ("logaddexp", logaddexp), ("expm1", expm1), ("flatten", flatten)):
+    for name, symbolic in (("isin", membership), ("logaddexp", logaddexp), ("expm1", expm1),
+                           ("flatten", flatten), ("scatter_reduce", scatter_reduce)):
         torch.onnx.register_custom_op_symbolic(f"aten::{name}", symbolic, OPSET)
     models = args.destination / "models"
     models.mkdir(parents=True, exist_ok=True)

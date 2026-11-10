@@ -33,8 +33,11 @@ with sync_playwright() as playwright:
     page.on("console", lambda message: print(message.text, flush=True) if message.type == "error" else None)
     page.on("pageerror", lambda error: print(error, flush=True))
     requests, sockets = [], []
+    shape_warnings = []
     page.on("request", lambda request: requests.append(request.url))
     page.on("websocket", lambda socket: sockets.append(socket.url))
+    page.on("console", lambda message: shape_warnings.append(message.text)
+            if "VerifyOutputSizes" in message.text or "Expected shape from model" in message.text else None)
     status = page.locator("#status")
     canvas = page.locator("canvas")
     page.goto(URL)
@@ -177,4 +180,5 @@ with sync_playwright() as playwright:
     capture("mobile")
     assert requests[before:] == [], requests[before:]
     assert sockets == [], sockets
+    assert not shape_warnings, shape_warnings[:3]
     browser.close()
