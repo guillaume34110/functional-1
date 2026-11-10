@@ -34,7 +34,8 @@ class FunctionalTwoSession(NeuralSession):
             return frame
         with torch.inference_mode():
             digits = self.model.counter.read(frame)
-            digits[:, -1] = level
+            digits[:, -2] = level // 10 or 10  # The digit vocabulary uses 10 for a blank.
+            digits[:, -1] = level % 10
             return self.model.counter.paint(frame, digits, torch.tensor([True]))
 
     def reset(self):

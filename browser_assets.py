@@ -39,6 +39,7 @@ def release_metadata(session):
         data["title_logo"] = encode(session.title_logo)
         data["starts"] = session.starts.tolist()
         data["level_frames"] = [encode(session.frame_for_level(level).numpy()) for level in session.levels]
+        data["color_level_10"] = encode(session.frame_for_level(10).numpy())
         data["native"] = {
             "keys": session.renderer.keys.tolist(),
             "tiles": session.renderer.tiles.reshape(-1, 64).tolist(),

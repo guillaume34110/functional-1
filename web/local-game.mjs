@@ -23,8 +23,11 @@ self.onmessage = ({ data }) => {
  paused = data.paused;
  if (data.reset) restart = true;
  if (data.credits) toggleCredits = true;
- if (paused || restart) pulses.length = 0;
- if (data.pulse && !paused && pulses.length < 16) pulses.push(data.pulse);
+ if (paused || data.reset) pulses.length = 0;
+ const softDrop = version === "v3" && data.pulse === "down" && data.softDrop;
+ if (data.pulse && !paused && pulses.length < (version === "v3" ? 32 : 16)) {
+  pulses.push({ button: data.pulse, softDrop });
+ }
 };
 
 async function play() {
@@ -43,6 +46,7 @@ async function play() {
   config.native ? nativeRenderer(config.native.keys, config.native.tiles) : pixels => pixels;
  const initialFrame = unpack(config.initial_frame);
  const levelFrames = config.level_frames?.map(unpack);
+ if (skin && config.color_level_10) levelFrames.push(unpack(config.color_level_10));
  let level = 1;
  const pausePanel = skin ? unpack(skin.screens.pause) : config.pause ? unpack(config.pause.frame) : null;
  const title = skin ? unpack(skin.screens.title) : config.title ? unpack(config.title) : null;
@@ -162,7 +166,10 @@ async function play() {
     publish(title, 0);
    }
   } else if (!paused && (!menu || pulses.length)) {
-   const action = config.actions.indexOf(pulses.shift() ?? held);
+   const pulse = pulses.shift();
+   // A soft drop can take two samples in the learned dynamics, even for a tap.
+   if (pulse?.softDrop && !menu && !suspended) pulses.unshift({ button: "down" });
+   const action = config.actions.indexOf(pulse?.button ?? held);
    const elapsed = await advance(action);
    const image = credits ? creditsPanel : ending ? overPanel : suspended && skin ? pausePanel :
     menu ?? display(suspended ? pausePanel : pixels);
