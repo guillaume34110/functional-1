@@ -192,7 +192,8 @@ def main():
     if not marker:
         raise ValueError("missing shared browser controls")
     (args.destination / "v3/index.html").write_text(color_page + marker + controls, encoding="utf-8")
-    copyfile(RELEASE.with_name("functional-3") / "color.json", models / "v3-color.json")
+    for asset in ("color.json", "menu.onnx", "menu-title.json"):
+        copyfile(RELEASE.with_name("functional-3") / asset, models / f"v3-{asset}")
     versions = {
         "v1": NeuralSession(RELEASE / "model.pt", RELEASE / "first-piece.npz"),
         "v2": FunctionalTwoSession(RELEASE.with_name("functional-2")),

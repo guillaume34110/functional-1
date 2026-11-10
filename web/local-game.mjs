@@ -36,11 +36,13 @@ async function play() {
   if (!response.ok) throw new Error("Could not load model metadata.");
   return response.json();
  };
- const [config, initial, recurrent, skin] = await Promise.all([
+ const [config, initial, recurrent, skin, menuModel, menuArt] = await Promise.all([
   readJson(root + ".json"),
   ort.InferenceSession.create(root + "-initial.onnx", options),
   ort.InferenceSession.create(root + "-recurrent.onnx", options),
   version === "v3" ? readJson("/models/v3-color.json") : null,
+  version === "v3" ? ort.InferenceSession.create("/models/v3-menu.onnx", options) : null,
+  version === "v3" ? readJson("/models/v3-menu-title.json") : null,
  ]);
  const render = skin ? colorRenderer(skin, unpack) :
   config.native ? nativeRenderer(config.native.keys, config.native.tiles) : pixels => pixels;
@@ -50,6 +52,13 @@ async function play() {
  let level = 1;
  const pausePanel = skin ? unpack(skin.screens.pause) : config.pause ? unpack(config.pause.frame) : null;
  const title = skin ? unpack(skin.screens.title) : config.title ? unpack(config.title) : null;
+ const titleLevels = menuArt?.strips.map(strip => {
+  const frame = title.slice();
+  frame.set(unpack(strip), menuArt.title_row * 160);
+  return frame;
+ });
+ const menuInput = menuModel ? new Float32Array(levelFrames.length + config.actions.length) : null;
+ const titleScreen = () => titleLevels?.[level - 1] ?? title;
  const logo = config.title ? unpack(config.title_logo) : null;
  const creditsPanel = skin ? unpack(skin.screens.credits) : null;
  const overPanel = skin ? unpack(skin.screens.over) : null;
@@ -106,7 +115,23 @@ async function play() {
     if (config.starts[action] || config.actions[action] === "b") credits = false;
     return 0;
    }
-   if (config.starts[action]) {
+   if (menuModel) {
+    menuInput.fill(0);
+    menuInput[level - 1] = 1;
+    menuInput[levelFrames.length + action] = 1;
+    const { logits } = await menuModel.run({ menu_input: new ort.Tensor("float32", menuInput, [1, menuInput.length]) });
+    const scores = logits.data;
+    const startIndex = levelFrames.length;
+    let choice = 0;
+    for (let i = 1; i < startIndex; i++) {
+     if (scores[i] > scores[choice]) choice = i;
+    }
+    level = choice + 1;
+    if (scores[startIndex + 1] > scores[startIndex]) {
+     menu = null;
+     reset();
+    }
+   } else if (config.starts[action]) {
     menu = null;
     reset();
    } else if (levelFrames) {
@@ -146,7 +171,7 @@ async function play() {
 
  reset();
  menu = title;
- publish(menu ?? display(pixels), 0);
+ publish(titleScreen() ?? display(pixels), 0);
  let deadline = performance.now();
  async function update() {
   const started = performance.now();
@@ -154,18 +179,18 @@ async function play() {
    restart = false;
    reset();
    menu = title;
-   publish(menu ?? display(pixels), 0);
+   publish(titleScreen() ?? display(pixels), 0);
   } else if (toggleCredits) {
    toggleCredits = false;
    if (creditsPanel && menu && !ending) {
     credits = !credits;
-    publish(credits ? creditsPanel : title, 0);
+    publish(credits ? creditsPanel : titleScreen(), 0);
    }
   } else if (ending && menu) {
    if (performance.now() >= endUntil) {
     ending = false;
     pulses.length = 0;
-    publish(title, 0);
+    publish(titleScreen(), 0);
    }
   } else if (!paused && (!menu || pulses.length)) {
    const button = pulses[0]?.button ?? held;
@@ -180,7 +205,7 @@ async function play() {
    }
    const elapsed = await advance(action);
    const image = credits ? creditsPanel : ending ? overPanel : suspended && skin ? pausePanel :
-    menu ?? display(suspended ? pausePanel : pixels);
+    menu ? (titleLevels ? titleScreen() : menu) : display(suspended ? pausePanel : pixels);
    publish(image, elapsed);
   }
   const now = performance.now();

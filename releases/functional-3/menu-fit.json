@@ -1,0 +1,14 @@
+{
+  "parameters": 508,
+  "train_transitions": 80,
+  "validation": {
+    "episodes": 60,
+    "transitions": 1500,
+    "errors": 0
+  },
+  "test": {
+    "episodes": 60,
+    "transitions": 1500,
+    "errors": 0
+  }
+}

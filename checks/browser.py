@@ -157,6 +157,7 @@ with sync_playwright() as playwright:
     expect(status).to_have_text("A game by Progsoft")
     page.get_by_role("button", name="Back to title").click()
     expect(canvas).to_have_attribute("data-screen", "title")
+    level_one_title = canvas.evaluate("canvas => canvas.toDataURL()")
     page.keyboard.press("ArrowLeft")
     expect(level).to_have_text("1")
     for _ in range(10):
@@ -164,26 +165,8 @@ with sync_playwright() as playwright:
     expect(level).to_have_text("10")
     page.keyboard.press("ArrowRight")
     expect(level).to_have_text("10")
-    page.get_by_role("button", name="Play", exact=True).click()
-    expect(canvas).to_have_attribute("data-screen", "game")
-    expect(intro).to_be_hidden()
-    tens_pixel = """canvas => {
-      const digits = canvas.getContext('2d').getImageData(136, 120, 8, 8).data;
-      return digits.some((red, i) => i % 4 === 0 && red > 150);
-    }"""
-    assert canvas.evaluate(tens_pixel), "level 10 should draw a tens digit in play"
-    page.get_by_role("button", name="Restart", exact=True).click()
-    expect(canvas).to_have_attribute("data-screen", "title")
-    expect(level).to_be_visible()
-    expect(level).to_have_text("10")
-    for _ in range(9):
-        page.keyboard.press("ArrowDown")
-    expect(level).to_have_text("1")
-    page.keyboard.press("ArrowRight")
-    expect(level).to_have_text("2")
-    page.get_by_role("button", name="Play", exact=True).click()
-    expect(canvas).to_have_attribute("data-screen", "game")
-    expect(level).to_be_hidden()
+    level_ten_title = canvas.evaluate("canvas => canvas.toDataURL()")
+    assert level_ten_title != level_one_title, "the level must change pixels inside the title screen"
     piece_extent = """() => {
       const ctx = document.querySelector('#screen').getContext('2d');
       const pixels = ctx.getImageData(16, 0, 80, 144).data;
@@ -193,6 +176,41 @@ with sync_playwright() as playwright:
       }
       return positions.length === 4 ? [Math.min(...positions), Math.max(...positions)] : null;
     }"""
+    first_drop = f"""() => {{
+      const rows = ({piece_extent})();
+      return rows?.[0] > 0 && Number(document.querySelector('#status').textContent.split(' ')[0]);
+    }}"""
+    page.get_by_role("button", name="Play", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "game")
+    expect(intro).to_be_hidden()
+    tens_pixel = """canvas => {
+      const digits = canvas.getContext('2d').getImageData(136, 120, 8, 8).data;
+      return digits.some((red, i) => i % 4 === 0 && red > 150);
+    }"""
+    assert canvas.evaluate(tens_pixel), "level 10 should draw a tens digit in play"
+    fast_drop = page.wait_for_function(first_drop).json_value()
+    page.get_by_role("button", name="Restart", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "title")
+    expect(level).to_be_visible()
+    expect(level).to_have_text("10")
+    assert canvas.evaluate("canvas => canvas.toDataURL()") == level_ten_title
+    for _ in range(9):
+        page.keyboard.press("ArrowDown")
+    expect(level).to_have_text("1")
+    assert canvas.evaluate("canvas => canvas.toDataURL()") == level_one_title
+    page.keyboard.press("z")
+    expect(canvas).to_have_attribute("data-screen", "game")
+    slow_drop = page.wait_for_function(first_drop).json_value()
+    assert fast_drop < slow_drop, (fast_drop, slow_drop)
+    page.get_by_role("button", name="Restart", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "title")
+    screen = canvas.bounding_box()
+    page.mouse.click(screen["x"] + screen["width"] * 124 / 160,
+                     screen["y"] + screen["height"] * 105 / 144)
+    expect(level).to_have_text("2")
+    page.get_by_role("button", name="Play", exact=True).click()
+    expect(canvas).to_have_attribute("data-screen", "game")
+    expect(level).to_be_hidden()
     # At this opening phase, Down used to stall after the second rotation.
     rotated, restored = page.evaluate(f"""() => new Promise((resolve, reject) => {{
       const status = document.querySelector('#status');
